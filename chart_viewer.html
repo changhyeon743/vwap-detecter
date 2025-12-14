@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VWAP Strategy - Live Charts</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              hl: {
+                bg: "#04060C",
+                panel: "#0d1117",
+                border: "#1e2a35",
+                accent: "#97FCE4",
+                teal: "#0F3933",
+                light: "#f5fefd",
+                muted: "#8b949e",
+                warning: "#FE9A00",
+                danger: "#FB2C36",
+                success: "#00C950",
+              },
+            },
+            fontFamily: {
+              inter: ["Inter", "sans-serif"],
+            },
+          },
+        },
+      };
+    </script>
+    <style>
+      @keyframes pulse-dot {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+      .animate-pulse-dot {
+        animation: pulse-dot 2s infinite;
+      }
+      .chart-card {
+        transition: transform 0.2s ease, border-color 0.3s ease;
+        cursor: pointer;
+      }
+      .chart-card:hover {
+        border-color: #97fce4;
+        transform: scale(1.02);
+      }
+      .chart-img {
+        transition: opacity 0.3s ease;
+      }
+      .chart-img.loading {
+        opacity: 0.5;
+      }
+      .value-update {
+        animation: flash 0.5s ease;
+      }
+      @keyframes flash {
+        0% {
+          background-color: rgba(151, 252, 228, 0.3);
+        }
+        100% {
+          background-color: transparent;
+        }
+      }
+      .badge {
+        transition: all 0.3s ease;
+      }
+      .symbol-btn.active {
+        background: #97fce4 !important;
+        color: #04060c !important;
+      }
+    </style>
+  </head>
+  <body class="bg-hl-bg text-hl-light font-inter min-h-screen">
+    <div class="max-w-[1800px] mx-auto px-12 py-4">
+      <!-- Header -->
+      <div class="text-center mb-4 pb-4 border-b border-hl-border">
+        <h1
+          class="text-2xl font-semibold mb-2 flex items-center justify-center gap-3"
+        >
+          VWAP Strategy - Live Charts
+          <span
+            class="inline-block w-2 h-2 rounded-full bg-hl-success animate-pulse-dot"
+          ></span>
+        </h1>
+        <p class="text-hl-muted text-sm">
+          Click chart to expand, or use symbol tabs
+        </p>
+      </div>
+
+      <!-- Controls -->
+      <div
+        class="flex flex-wrap items-center gap-4 bg-hl-panel rounded-xl p-4 mb-4 border border-hl-border"
+      >
+        <div class="flex items-center gap-2">
+          <span class="text-hl-muted text-sm">Update:</span>
+          <select
+            id="refresh-interval"
+            class="bg-hl-bg border border-hl-border text-hl-light px-3 py-1.5 text-sm rounded-lg"
+          >
+            <option value="5">5 sec</option>
+            <option value="10" selected>10 sec</option>
+            <option value="30">30 sec</option>
+            <option value="60">60 sec</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-2">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              id="auto-refresh"
+              class="w-4 h-4 rounded"
+              checked
+            />
+            <span class="text-hl-muted text-sm">Live Updates</span>
+          </label>
+        </div>
+        <div class="flex items-center gap-4 ml-auto">
+          <div class="text-hl-muted text-sm">
+            Symbols: <span id="symbol-count" class="text-hl-accent">0</span>
+          </div>
+          <div class="text-hl-muted text-sm">
+            Signals: <span id="signal-count" class="text-hl-success">0</span>
+          </div>
+          <div class="text-hl-muted text-sm">
+            Updated: <span id="last-update" class="text-hl-accent">-</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Symbol Tabs -->
+      <div class="bg-hl-panel rounded-xl p-4 mb-4 border border-hl-border">
+        <div id="symbol-tabs" class="flex flex-wrap gap-2">
+          <button
+            class="symbol-btn active px-3 py-1.5 text-sm rounded-lg border border-hl-border text-hl-muted hover:border-hl-accent hover:text-hl-accent transition-colors"
+            data-symbol="all"
+          >
+            All
+          </button>
+        </div>
+      </div>
+
+      <!-- Single Chart View (hidden by default) -->
+      <div id="single-view" class="hidden">
+        <div
+          class="bg-hl-panel rounded-xl border border-hl-border overflow-hidden"
+        >
+          <div
+            class="p-4 border-b border-hl-border flex justify-between items-center"
+          >
+            <div>
+              <span
+                id="single-symbol"
+                class="text-xl font-semibold text-hl-light"
+                >-</span
+              >
+              <span id="single-timeframe" class="text-hl-muted text-sm ml-2"
+                >3m</span
+              >
+            </div>
+            <div id="single-signal-badge" class="hidden">
+              <span class="px-3 py-1 text-sm rounded-lg font-medium"></span>
+            </div>
+          </div>
+          <div id="single-chart-container" class="p-4">
+            <img
+              id="single-chart-img"
+              src=""
+              alt=""
+              class="w-full rounded-lg"
+            />
+          </div>
+          <div
+            id="single-chart-info"
+            class="p-4 border-t border-hl-border grid grid-cols-2 md:grid-cols-4 gap-4"
+          >
+            <div>
+              <div class="text-hl-muted text-xs">Close</div>
+              <div
+                id="single-close"
+                class="text-lg font-semibold text-hl-light"
+              >
+                -
+              </div>
+            </div>
+            <div>
+              <div class="text-hl-muted text-xs">VWAP</div>
+              <div
+                id="single-vwap"
+                class="text-lg font-semibold text-hl-accent"
+              >
+                -
+              </div>
+            </div>
+            <div>
+              <div class="text-hl-muted text-xs">Upper Band</div>
+              <div
+                id="single-upper"
+                class="text-lg font-semibold text-hl-warning"
+              >
+                -
+              </div>
+            </div>
+            <div>
+              <div class="text-hl-muted text-xs">Lower Band</div>
+              <div
+                id="single-lower"
+                class="text-lg font-semibold text-hl-success"
+              >
+                -
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Charts Grid -->
+      <div
+        id="charts-grid"
+        class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4"
+      >
+        <div class="col-span-full text-center text-hl-muted py-20">
+          Loading charts...
+        </div>
+      </div>
+
+      <!-- Signal History -->
+      <div class="mt-4 bg-hl-panel rounded-xl border border-hl-border p-4">
+        <div class="text-hl-light font-medium mb-3">Recent Signals</div>
+        <div id="signal-history" class="flex flex-wrap gap-2">
+          <div class="text-hl-muted text-sm">No signals yet</div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // State
+      let state = {
+        symbols: [],
+        signals: {},
+        signalHistory: [],
+        timeframe: "3m",
+        initialized: false,
+        currentView: "all", // "all" or symbol name
+        lastData: null,
+      };
+      let autoRefresh = true;
+      let refreshInterval = 10;
+      let intervalId = null;
+
+      async function loadData() {
+        try {
+          const response = await fetch("charts/live_data.json?t=" + Date.now());
+          if (!response.ok) return null;
+          return await response.json();
+        } catch (e) {
+          console.log("Data not available yet");
+          return null;
+        }
+      }
+
+      function calculateSuspicion(s, signals) {
+        if (signals && signals[s.symbol]) return 1000;
+        if (!s.close || !s.upper_band || !s.lower_band || !s.vwap) return 0;
+        const bandWidth = s.upper_band - s.lower_band;
+        if (bandWidth <= 0) return 0;
+        const distFromUpper = (s.upper_band - s.close) / bandWidth;
+        const distFromLower = (s.close - s.lower_band) / bandWidth;
+        const minDist = Math.min(
+          Math.abs(distFromUpper),
+          Math.abs(distFromLower)
+        );
+        return Math.max(0, (0.5 - minDist) * 200);
+      }
+
+      function getCleanSymbol(symbol) {
+        return symbol.replace("/USDT:USDT", "").replace(":USDT", "");
+      }
+
+      function switchView(symbol) {
+        state.currentView = symbol;
+        const gridView = document.getElementById("charts-grid");
+        const singleView = document.getElementById("single-view");
+
+        // Update tab buttons
+        document.querySelectorAll(".symbol-btn").forEach((btn) => {
+          btn.classList.remove("active");
+          if (btn.dataset.symbol === symbol) {
+            btn.classList.add("active");
+          }
+        });
+
+        if (symbol === "all") {
+          gridView.classList.remove("hidden");
+          singleView.classList.add("hidden");
+        } else {
+          gridView.classList.add("hidden");
+          singleView.classList.remove("hidden");
+          updateSingleView(symbol);
+        }
+      }
+
+      function updateSingleView(symbol) {
+        if (!state.lastData) return;
+
+        const s = state.lastData.symbols.find((sym) => sym.symbol === symbol);
+        if (!s) return;
+
+        const cleanSymbol = getCleanSymbol(symbol);
+        const signals = state.lastData.signals || {};
+        const hasSignal = signals[symbol];
+
+        document.getElementById("single-symbol").textContent = cleanSymbol;
+        document.getElementById("single-timeframe").textContent =
+          state.lastData.timeframe || "3m";
+
+        // Update signal badge
+        const badge = document.getElementById("single-signal-badge");
+        if (hasSignal) {
+          badge.classList.remove("hidden");
+          badge.querySelector("span").textContent = hasSignal.type + " SIGNAL";
+          badge.querySelector("span").className =
+            hasSignal.type === "LONG"
+              ? "px-3 py-1 text-sm rounded-lg font-medium bg-hl-success/20 text-hl-success"
+              : "px-3 py-1 text-sm rounded-lg font-medium bg-hl-danger/20 text-hl-danger";
+        } else {
+          badge.classList.add("hidden");
+        }
+
+        // Update chart
+        const chartPath = `charts/live_${cleanSymbol}.png?t=${Date.now()}`;
+        document.getElementById("single-chart-img").src = chartPath;
+        document.getElementById("single-chart-img").alt = cleanSymbol;
+
+        // Update values
+        document.getElementById("single-close").textContent =
+          s.close?.toFixed(4) || "-";
+        document.getElementById("single-vwap").textContent =
+          s.vwap?.toFixed(4) || "-";
+        document.getElementById("single-upper").textContent =
+          s.upper_band?.toFixed(4) || "-";
+        document.getElementById("single-lower").textContent =
+          s.lower_band?.toFixed(4) || "-";
+      }
+
+      function renderSymbolTabs(data) {
+        const signals = data.signals || {};
+        const container = document.getElementById("symbol-tabs");
+
+        // Sort by suspicion
+        const sortedSymbols = [...data.symbols].sort((a, b) => {
+          return (
+            calculateSuspicion(b, signals) - calculateSuspicion(a, signals)
+          );
+        });
+
+        container.innerHTML =
+          `
+          <button class="symbol-btn ${
+            state.currentView === "all" ? "active" : ""
+          } px-3 py-1.5 text-sm rounded-lg border border-hl-border text-hl-muted hover:border-hl-accent hover:text-hl-accent transition-colors" data-symbol="all">
+            All
+          </button>
+        ` +
+          sortedSymbols
+            .map((s) => {
+              const cleanSymbol = getCleanSymbol(s.symbol);
+              const hasSignal = signals[s.symbol];
+              const signalClass = hasSignal
+                ? hasSignal.type === "LONG"
+                  ? "border-hl-success"
+                  : "border-hl-danger"
+                : "border-hl-border";
+              const emoji = hasSignal
+                ? hasSignal.type === "LONG"
+                  ? " 🟢"
+                  : " 🔴"
+                : "";
+
+              return `
+            <button class="symbol-btn ${
+              state.currentView === s.symbol ? "active" : ""
+            } px-3 py-1.5 text-sm rounded-lg border ${signalClass} text-hl-muted hover:border-hl-accent hover:text-hl-accent transition-colors" data-symbol="${
+                s.symbol
+              }">
+              ${cleanSymbol}${emoji}
+            </button>
+          `;
+            })
+            .join("");
+
+        // Add click handlers
+        container.querySelectorAll(".symbol-btn").forEach((btn) => {
+          btn.addEventListener("click", () => switchView(btn.dataset.symbol));
+        });
+      }
+
+      function createChartCard(s, signals, timeframe) {
+        const cleanSymbol = getCleanSymbol(s.symbol);
+        const hasSignal = signals[s.symbol];
+        const suspicion = calculateSuspicion(s, signals);
+
+        let borderClass = "border-hl-border";
+        let badge = "";
+
+        if (hasSignal) {
+          borderClass =
+            hasSignal.type === "LONG"
+              ? "border-hl-success"
+              : "border-hl-danger";
+          badge = `<span class="badge absolute top-2 right-2 px-2 py-1 text-xs rounded font-bold ${
+            hasSignal.type === "LONG"
+              ? "bg-hl-success text-black"
+              : "bg-hl-danger text-white"
+          }">${hasSignal.type}</span>`;
+        } else if (suspicion > 30) {
+          badge = `<span class="badge absolute top-2 right-2 px-2 py-1 text-xs rounded bg-hl-warning/20 text-hl-warning">WATCH</span>`;
+        }
+
+        const chartPath = `charts/live_${cleanSymbol}.png?t=${Date.now()}`;
+
+        const div = document.createElement("div");
+        div.className = `chart-card bg-hl-panel rounded-xl border-2 ${borderClass} overflow-hidden relative`;
+        div.dataset.symbol = s.symbol;
+        div.dataset.suspicion = suspicion;
+        div.innerHTML = `
+          ${badge}
+          <div class="p-2 border-b border-hl-border flex justify-between items-center">
+            <span class="font-semibold text-sm">${cleanSymbol}</span>
+            <span class="text-xs text-hl-muted">${timeframe}</span>
+          </div>
+          <div class="p-1">
+            <img src="${chartPath}" alt="${cleanSymbol}" class="chart-img w-full rounded" data-symbol="${
+          s.symbol
+        }"
+                 onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 400 200%22><rect fill=%22%230d1117%22 width=%22400%22 height=%22200%22/><text fill=%22%238b949e%22 x=%22200%22 y=%22100%22 text-anchor=%22middle%22>Loading...</text></svg>'">
+          </div>
+          <div class="p-2 grid grid-cols-4 gap-1 text-xs border-t border-hl-border">
+            <div class="text-center">
+              <div class="text-hl-muted">Close</div>
+              <div class="data-close text-hl-light font-medium">${
+                s.close?.toFixed(2) || "-"
+              }</div>
+            </div>
+            <div class="text-center">
+              <div class="text-hl-muted">VWAP</div>
+              <div class="data-vwap text-hl-accent font-medium">${
+                s.vwap?.toFixed(2) || "-"
+              }</div>
+            </div>
+            <div class="text-center">
+              <div class="text-hl-muted">Upper</div>
+              <div class="data-upper text-hl-warning font-medium">${
+                s.upper_band?.toFixed(2) || "-"
+              }</div>
+            </div>
+            <div class="text-center">
+              <div class="text-hl-muted">Lower</div>
+              <div class="data-lower text-hl-success font-medium">${
+                s.lower_band?.toFixed(2) || "-"
+              }</div>
+            </div>
+          </div>
+        `;
+
+        // Click to expand
+        div.addEventListener("click", () => switchView(s.symbol));
+
+        return div;
+      }
+
+      function updateChartCard(card, s, signals, timeframe) {
+        const cleanSymbol = getCleanSymbol(s.symbol);
+        const hasSignal = signals[s.symbol];
+        const suspicion = calculateSuspicion(s, signals);
+        const oldSuspicion = parseFloat(card.dataset.suspicion) || 0;
+
+        card.dataset.suspicion = suspicion;
+        card.className = card.className.replace(/border-hl-\w+/g, "");
+        let borderClass = "border-hl-border";
+        let badgeHtml = "";
+
+        if (hasSignal) {
+          borderClass =
+            hasSignal.type === "LONG"
+              ? "border-hl-success"
+              : "border-hl-danger";
+          badgeHtml = `<span class="badge absolute top-2 right-2 px-2 py-1 text-xs rounded font-bold ${
+            hasSignal.type === "LONG"
+              ? "bg-hl-success text-black"
+              : "bg-hl-danger text-white"
+          }">${hasSignal.type}</span>`;
+        } else if (suspicion > 30) {
+          badgeHtml = `<span class="badge absolute top-2 right-2 px-2 py-1 text-xs rounded bg-hl-warning/20 text-hl-warning">WATCH</span>`;
+        }
+
+        card.classList.add(borderClass);
+
+        const existingBadge = card.querySelector(".badge");
+        if (existingBadge) existingBadge.remove();
+        if (badgeHtml) card.insertAdjacentHTML("afterbegin", badgeHtml);
+
+        const img = card.querySelector(".chart-img");
+        if (img) {
+          img.classList.add("loading");
+          const newSrc = `charts/live_${cleanSymbol}.png?t=${Date.now()}`;
+          const newImg = new Image();
+          newImg.onload = () => {
+            img.src = newSrc;
+            img.classList.remove("loading");
+          };
+          newImg.onerror = () => {
+            img.classList.remove("loading");
+          };
+          newImg.src = newSrc;
+        }
+
+        const updateValue = (selector, newValue) => {
+          const el = card.querySelector(selector);
+          if (el && el.textContent !== newValue) {
+            el.textContent = newValue;
+            el.classList.add("value-update");
+            setTimeout(() => el.classList.remove("value-update"), 500);
+          }
+        };
+
+        updateValue(".data-close", s.close?.toFixed(2) || "-");
+        updateValue(".data-vwap", s.vwap?.toFixed(2) || "-");
+        updateValue(".data-upper", s.upper_band?.toFixed(2) || "-");
+        updateValue(".data-lower", s.lower_band?.toFixed(2) || "-");
+
+        return suspicion !== oldSuspicion;
+      }
+
+      function renderCharts(data) {
+        if (!data || !data.symbols) return;
+
+        state.lastData = data;
+        const signals = data.signals || {};
+        const signalCount = Object.keys(signals).length;
+
+        document.getElementById("symbol-count").textContent =
+          data.symbols.length;
+        document.getElementById("signal-count").textContent = signalCount;
+
+        // Update symbol tabs
+        renderSymbolTabs(data);
+
+        // Update single view if active
+        if (state.currentView !== "all") {
+          updateSingleView(state.currentView);
+        }
+
+        const container = document.getElementById("charts-grid");
+        const sortedSymbols = [...data.symbols].sort((a, b) => {
+          return (
+            calculateSuspicion(b, signals) - calculateSuspicion(a, signals)
+          );
+        });
+
+        if (!state.initialized) {
+          container.innerHTML = "";
+          sortedSymbols.forEach((s) => {
+            container.appendChild(
+              createChartCard(s, signals, data.timeframe || "3m")
+            );
+          });
+          state.initialized = true;
+        } else {
+          let needsReorder = false;
+          sortedSymbols.forEach((s) => {
+            let card = container.querySelector(`[data-symbol="${s.symbol}"]`);
+            if (card) {
+              const orderChanged = updateChartCard(
+                card,
+                s,
+                signals,
+                data.timeframe || "3m"
+              );
+              if (orderChanged) needsReorder = true;
+            } else {
+              container.appendChild(
+                createChartCard(s, signals, data.timeframe || "3m")
+              );
+              needsReorder = true;
+            }
+          });
+
+          if (needsReorder) {
+            const cards = Array.from(container.children);
+            cards.sort(
+              (a, b) =>
+                (parseFloat(b.dataset.suspicion) || 0) -
+                (parseFloat(a.dataset.suspicion) || 0)
+            );
+            cards.forEach((card) => container.appendChild(card));
+          }
+        }
+
+        state.symbols = data.symbols;
+        state.signals = signals;
+        state.timeframe = data.timeframe || "3m";
+      }
+
+      function updateSignalHistory(data) {
+        if (!data || !data.signal_history) return;
+
+        const newHistory = JSON.stringify(data.signal_history.slice(0, 20));
+        const oldHistory = JSON.stringify(state.signalHistory);
+        if (newHistory === oldHistory) return;
+
+        state.signalHistory = data.signal_history.slice(0, 20);
+
+        const container = document.getElementById("signal-history");
+        if (data.signal_history.length === 0) {
+          container.innerHTML =
+            '<div class="text-hl-muted text-sm">No signals yet</div>';
+          return;
+        }
+
+        container.innerHTML = state.signalHistory
+          .map(
+            (s) => `
+          <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-hl-bg/50 text-sm cursor-pointer hover:bg-hl-bg" onclick="switchView('${
+            s.symbol
+          }')">
+            <span class="${
+              s.type === "LONG" ? "text-hl-success" : "text-hl-danger"
+            }">${s.type === "LONG" ? "🟢" : "🔴"}</span>
+            <span class="font-medium">${getCleanSymbol(s.symbol)}</span>
+            <span class="text-hl-muted text-xs">${new Date(
+              s.time
+            ).toLocaleTimeString()}</span>
+          </div>
+        `
+          )
+          .join("");
+      }
+
+      async function refresh() {
+        const data = await loadData();
+        if (data) {
+          renderCharts(data);
+          updateSignalHistory(data);
+          document.getElementById("last-update").textContent =
+            new Date().toLocaleTimeString();
+        }
+      }
+
+      function startAutoRefresh() {
+        if (intervalId) clearInterval(intervalId);
+        intervalId = setInterval(refresh, refreshInterval * 1000);
+      }
+
+      function stopAutoRefresh() {
+        if (intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+      }
+
+      document
+        .getElementById("auto-refresh")
+        .addEventListener("change", (e) => {
+          autoRefresh = e.target.checked;
+          if (autoRefresh) startAutoRefresh();
+          else stopAutoRefresh();
+        });
+
+      document
+        .getElementById("refresh-interval")
+        .addEventListener("change", (e) => {
+          refreshInterval = parseInt(e.target.value);
+          if (autoRefresh) startAutoRefresh();
+        });
+
+      refresh();
+      startAutoRefresh();
+    </script>
+  </body>
+</html>
