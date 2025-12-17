@@ -224,8 +224,10 @@ class BybitTrader:
             if isinstance(precision, float):
                 precision = int(precision) if precision > 0 else 3
 
-            # Calculate quantity (without leverage - Bybit handles leverage)
-            quantity = usdt_amount / price
+            # Calculate quantity: margin * leverage = position size
+            # e.g., $100 margin * 20x = $2000 position
+            position_value = usdt_amount * LEVERAGE
+            quantity = position_value / price
 
             # Round to precision
             quantity = round(quantity, precision)
@@ -310,8 +312,17 @@ class BybitTrader:
         """Execute a trade based on signal with TP/SL"""
         try:
             side = 'buy' if signal_type == 'LONG' else 'sell'
-            quantity = self.calculate_quantity(symbol, ORDER_SIZE_USDT)
 
+            print(f"🔄 Executing {signal_type} for {symbol}")
+            print(f"📊 Order size: ${ORDER_SIZE_USDT} | Leverage: {LEVERAGE}x")
+
+            # Get current price first (for fallback and logging)
+            current_price = self.get_ticker_price(symbol)
+            if not current_price:
+                return None, "Could not get current price"
+            print(f"💰 Current price: ${current_price:.4f}")
+
+            quantity = self.calculate_quantity(symbol, ORDER_SIZE_USDT)
             if not quantity:
                 return None, "Failed to calculate quantity"
 
@@ -321,19 +332,17 @@ class BybitTrader:
                 return None, "Market order failed"
 
             # Get fill price (try multiple sources)
-            entry_price = None
-            if order.get('average'):
-                entry_price = float(order['average'])
-            elif order.get('price'):
-                entry_price = float(order['price'])
-            elif price:
-                entry_price = float(price)
-            else:
-                # Fallback: get current market price
-                entry_price = self.get_ticker_price(symbol)
-
-            if not entry_price:
-                return None, "Could not determine entry price"
+            entry_price = current_price  # Default fallback
+            try:
+                if order.get('average') and order['average'] is not None:
+                    entry_price = float(order['average'])
+                elif order.get('price') and order['price'] is not None:
+                    entry_price = float(order['price'])
+                elif price and price is not None:
+                    entry_price = float(price)
+            except (TypeError, ValueError) as e:
+                print(f"⚠️ Price conversion issue: {e}, using current price")
+                entry_price = current_price
 
             print(f"✅ Order filled at ${entry_price:.4f}")
 
