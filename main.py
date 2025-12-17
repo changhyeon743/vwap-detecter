@@ -172,8 +172,14 @@ class BybitTrader:
             'apiKey': BYBIT_API_KEY,
             'secret': BYBIT_API_SECRET,
             'enableRateLimit': True,
-            'options': {'defaultType': 'linear'}
+            'options': {
+                'defaultType': 'linear',
+                'adjustForTimeDifference': True,  # Auto-sync with server time
+                'recvWindow': 60000,  # 60 second tolerance
+            }
         })
+        # Sync time with Bybit server
+        self.exchange.load_time_difference()
         self.positions = {}  # Track open positions
         self.pending_signals = {}  # Signals waiting for user action
 
@@ -214,16 +220,21 @@ class BybitTrader:
             min_qty = market.get('limits', {}).get('amount', {}).get('min', 0.001)
             precision = market.get('precision', {}).get('amount', 3)
 
-            # Calculate quantity
-            quantity = (usdt_amount * LEVERAGE) / price
+            # Ensure precision is an integer
+            if isinstance(precision, float):
+                precision = int(precision) if precision > 0 else 3
+
+            # Calculate quantity (without leverage - Bybit handles leverage)
+            quantity = usdt_amount / price
 
             # Round to precision
             quantity = round(quantity, precision)
 
             # Ensure minimum quantity
-            if quantity < min_qty:
+            if min_qty and quantity < min_qty:
                 quantity = min_qty
 
+            print(f"📊 Quantity calc: ${usdt_amount} / ${price:.4f} = {quantity} (min: {min_qty})")
             return quantity
         except Exception as e:
             print(f"❌ Error calculating quantity: {e}")
