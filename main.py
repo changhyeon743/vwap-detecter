@@ -37,10 +37,16 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 # Trading Settings
 LEVERAGE = int(os.getenv('LEVERAGE', '20'))
-ORDER_SIZE_USDT = float(os.getenv('ORDER_SIZE_USDT', '100'))  # Position size in USDT
-TP_PERCENT = float(os.getenv('TP_PERCENT', '1.5'))  # Take Profit %
-SL_PERCENT = float(os.getenv('SL_PERCENT', '0.75'))  # Stop Loss %
+ORDER_SIZE_USDT = float(os.getenv('ORDER_SIZE_USDT', '100'))  # Margin size in USDT
 POSITION_CHECK_INTERVAL = int(os.getenv('POSITION_CHECK_INTERVAL', '10'))  # seconds
+
+# Trailing Stop Settings (1m Swing Strategy)
+# TP = Signal's VWAP target (no env needed)
+# SL = Trailing based on 1m swing + buffer
+TRAILING_STOP_ENABLED = os.getenv('TRAILING_STOP_ENABLED', 'true').lower() == 'true'
+SWING_N = int(os.getenv('SWING_N', '20'))  # Number of 1m candles for swing high/low
+TRAIL_UPDATE_INTERVAL = int(os.getenv('TRAIL_UPDATE_INTERVAL', '60'))  # seconds between SL updates
+SL_BUFFER_PERCENT = float(os.getenv('SL_BUFFER_PERCENT', '0.3'))  # Buffer as % of price (0.3% default)
 
 # Monitor Settings
 TIMEFRAMES = os.getenv('TIMEFRAMES', '3m,5m,15m').split(',')
@@ -258,17 +264,16 @@ class BybitTrader:
             print(f"❌ Order failed: {e}")
             return None
 
-    def place_tp_sl(self, symbol, side, entry_price, quantity):
-        """Place Take Profit and Stop Loss using Bybit's position TP/SL"""
+    def place_tp_sl(self, symbol, side, entry_price, tp_price=None, sl_price=None):
+        """
+        Place Take Profit and Stop Loss using Bybit's position TP/SL
+        - tp_price: Signal's VWAP target (required)
+        - sl_price: Signal's initial stop loss (will be trailed later)
+        """
         try:
-            if side == 'buy':  # Long position
-                tp_price = entry_price * (1 + TP_PERCENT / 100)
-                sl_price = entry_price * (1 - SL_PERCENT / 100)
-                position_side = 'Buy'
-            else:  # Short position
-                tp_price = entry_price * (1 - TP_PERCENT / 100)
-                sl_price = entry_price * (1 + SL_PERCENT / 100)
-                position_side = 'Sell'
+            if tp_price is None or sl_price is None:
+                print(f"⚠️ TP or SL not provided, skipping TP/SL setup")
+                return None
 
             # Round prices
             market = self.exchange.market(symbol)
@@ -281,7 +286,7 @@ class BybitTrader:
             # Get the Bybit symbol format
             bybit_symbol = symbol.replace('/USDT:USDT', 'USDT').replace(':USDT', '')
 
-            print(f"📊 Setting TP: ${tp_price} / SL: ${sl_price} for {bybit_symbol}")
+            print(f"📊 Setting TP: ${tp_price} (VWAP) / SL: ${sl_price} for {bybit_symbol}")
 
             # Use Bybit's set_trading_stop API
             response = self.exchange.private_post_v5_position_trading_stop({
@@ -304,12 +309,15 @@ class BybitTrader:
 
         except Exception as e:
             print(f"❌ TP/SL placement failed: {e}")
-            # Return prices anyway for display
-            return {'tp_price': tp_price if 'tp_price' in dir() else None,
-                    'sl_price': sl_price if 'sl_price' in dir() else None}
+            return {'tp_price': tp_price if 'tp_price' in locals() else None,
+                    'sl_price': sl_price if 'sl_price' in locals() else None}
 
-    def execute_signal_trade(self, symbol, signal_type, price=None):
-        """Execute a trade based on signal with TP/SL"""
+    def execute_signal_trade(self, symbol, signal_type, tp_target=None, sl_initial=None):
+        """
+        Execute a trade based on signal with TP/SL
+        - tp_target: VWAP target from signal
+        - sl_initial: Initial stop loss from signal (will be trailed)
+        """
         try:
             side = 'buy' if signal_type == 'LONG' else 'sell'
 
@@ -338,16 +346,18 @@ class BybitTrader:
                     entry_price = float(order['average'])
                 elif order.get('price') and order['price'] is not None:
                     entry_price = float(order['price'])
-                elif price and price is not None:
-                    entry_price = float(price)
             except (TypeError, ValueError) as e:
                 print(f"⚠️ Price conversion issue: {e}, using current price")
                 entry_price = current_price
 
             print(f"✅ Order filled at ${entry_price:.4f}")
 
-            # Place TP/SL
-            tp_sl = self.place_tp_sl(symbol, side, entry_price, quantity)
+            # Place TP/SL using signal's target and stop loss
+            tp_sl = None
+            if tp_target and sl_initial:
+                print(f"🎯 TP Target (VWAP): ${tp_target:.4f}")
+                print(f"🛑 SL Initial: ${sl_initial:.4f}")
+                tp_sl = self.place_tp_sl(symbol, side, entry_price, tp_target, sl_initial)
 
             # Track position
             self.positions[symbol] = {
@@ -355,8 +365,8 @@ class BybitTrader:
                 'entry_price': entry_price,
                 'quantity': quantity,
                 'entry_time': datetime.now(timezone.utc),
-                'tp_price': tp_sl.get('tp_price') if tp_sl else None,
-                'sl_price': tp_sl.get('sl_price') if tp_sl else None
+                'tp_price': tp_sl.get('tp_price') if tp_sl else tp_target,
+                'sl_price': tp_sl.get('sl_price') if tp_sl else sl_initial
             }
 
             return {
@@ -411,6 +421,107 @@ class BybitTrader:
         except Exception as e:
             print(f"❌ Error closing position: {e}")
             return None
+
+    # ========== Trailing Stop Methods ==========
+
+    def fetch_1m_ohlcv(self, symbol, limit=50):
+        """Fetch 1-minute OHLCV data for trailing stop"""
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, '1m', limit=limit)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            return df
+        except Exception as e:
+            print(f"⚠️ Error fetching 1m data: {e}")
+            return None
+
+    def calc_trailing_sl(self, symbol, side, entry_price=None):
+        """
+        Calculate new SL based on 1m swing high/low + buffer
+        - Long: SL = swing_low - buffer (only moves UP)
+        - Short: SL = swing_high + buffer (only moves DOWN)
+
+        Buffer is percentage-based (works for any coin price)
+        """
+        df = self.fetch_1m_ohlcv(symbol, limit=SWING_N + 10)
+        if df is None or len(df) < SWING_N:
+            return None
+
+        # Get last N candles (exclude current incomplete candle)
+        recent = df.tail(SWING_N + 1).head(SWING_N)
+        current_price = df.iloc[-1]['close']
+
+        # Buffer as percentage of price (e.g., 0.3% of $100,000 = $300)
+        buffer = current_price * (SL_BUFFER_PERCENT / 100)
+
+        if side == 'long':
+            swing_low = recent['low'].min()
+            new_sl = swing_low - buffer
+
+            # Safety: SL must be below current price by at least buffer
+            max_sl = current_price - buffer
+            if new_sl > max_sl:
+                new_sl = max_sl
+
+        else:  # short
+            swing_high = recent['high'].max()
+            new_sl = swing_high + buffer
+
+            # Safety: SL must be above current price by at least buffer
+            min_sl = current_price + buffer
+            if new_sl < min_sl:
+                new_sl = min_sl
+
+        return new_sl
+
+    def update_position_sl(self, symbol, new_sl, current_tp=None):
+        """Update stop-loss on Bybit position"""
+        try:
+            # Robust symbol lookup
+            try:
+                market = self.exchange.market(symbol)
+                ccxt_symbol = market['symbol']
+            except Exception:
+                market = self.exchange.markets_by_id.get(symbol)
+                if not market:
+                    raise ValueError(f"Unknown symbol: {symbol}")
+                ccxt_symbol = market['symbol']
+
+            bybit_symbol = ccxt_symbol.replace('/USDT:USDT', 'USDT').replace(':USDT', '')
+
+            # Round price
+            price_precision = market.get('precision', {}).get('price', 2)
+            if isinstance(price_precision, float):
+                price_precision = int(price_precision) if price_precision > 0 else 2
+            new_sl = round(float(new_sl), price_precision)
+
+            params = {
+                'category': 'linear',
+                'symbol': bybit_symbol,
+                'stopLoss': str(new_sl),
+                'slTriggerBy': 'LastPrice',
+                'tpslMode': 'Full',
+                'positionIdx': 0,
+            }
+
+            # Include TP if provided (to avoid resetting it)
+            if current_tp is not None:
+                tp = round(float(current_tp), price_precision)
+                params['takeProfit'] = str(tp)
+                params['tpTriggerBy'] = 'LastPrice'
+
+            response = self.exchange.private_post_v5_position_trading_stop(params)
+            ok = response.get('retCode') == 0
+
+            if ok:
+                print(f"✅ SL updated to ${new_sl:.4f} for {bybit_symbol}")
+            else:
+                print(f"⚠️ SL update: {response.get('retMsg', response)}")
+
+            return ok
+
+        except Exception as e:
+            print(f"❌ SL update failed: {e}")
+            return False
 
 
 # Global trader instance
@@ -900,7 +1011,7 @@ class BybitMonitor:
 {rr_line}
 
 <b>Leverage:</b> {LEVERAGE}x | <b>Size:</b> ${ORDER_SIZE_USDT}
-<b>Auto TP:</b> {TP_PERCENT}% | <b>Auto SL:</b> {SL_PERCENT}%
+<b>TP:</b> VWAP target | <b>SL:</b> Trailing (1m swing)
 
 <i>Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</i>
 """
@@ -930,12 +1041,14 @@ class BybitMonitor:
         else:
             send_telegram_with_buttons(message, buttons)
 
-        # Store pending signal for callback handler
+        # Store pending signal for callback handler (including TP/SL)
         if trader:
             trader.pending_signals[clean_symbol] = {
                 'symbol': symbol,
                 'signal_type': signal_type,
                 'price': signal['price'],
+                'target': signal.get('target'),  # VWAP target for TP
+                'stop_loss': signal.get('stop_loss'),  # Initial SL
                 'timeframe': timeframe,
                 'timestamp': time.time()
             }
@@ -1168,14 +1281,26 @@ class TelegramBotHandler:
                 self.answer_callback(callback_id, f"Executing {signal_type}...")
 
                 if trader:
-                    # Execute trade
-                    result, error = trader.execute_signal_trade(symbol, signal_type)
+                    # Get pending signal with TP/SL values
+                    pending = trader.pending_signals.get(symbol_short, {})
+                    tp_target = pending.get('target')  # VWAP target
+                    sl_initial = pending.get('stop_loss')  # Initial SL
+
+                    # Execute trade with signal's TP/SL
+                    result, error = trader.execute_signal_trade(
+                        symbol, signal_type,
+                        tp_target=tp_target,
+                        sl_initial=sl_initial
+                    )
 
                     if result:
                         entry = result['entry_price']
                         qty = result['quantity']
-                        tp_price = result['tp_sl'].get('tp_price') if result['tp_sl'] else None
-                        sl_price = result['tp_sl'].get('sl_price') if result['tp_sl'] else None
+                        tp_price = result['tp_sl'].get('tp_price') if result['tp_sl'] else tp_target
+                        sl_price = result['tp_sl'].get('sl_price') if result['tp_sl'] else sl_initial
+
+                        tp_str = f"${tp_price:.4f} (VWAP)" if tp_price else "Not set"
+                        sl_str = f"${sl_price:.4f} (trailing)" if sl_price else "Not set"
 
                         msg = f"""✅ <b>Order Executed!</b>
 
@@ -1185,11 +1310,15 @@ class TelegramBotHandler:
 <b>Quantity:</b> {qty}
 <b>Leverage:</b> {LEVERAGE}x
 
-<b>TP:</b> ${tp_price:.4f} (+{TP_PERCENT}%)
-<b>SL:</b> ${sl_price:.4f} (-{SL_PERCENT}%)
+<b>TP:</b> {tp_str}
+<b>SL:</b> {sl_str}
 
-<i>Position monitoring active</i>"""
+<i>Trailing SL active (1m swing)</i>"""
                         send_telegram(msg)
+
+                        # Clear pending signal
+                        if symbol_short in trader.pending_signals:
+                            del trader.pending_signals[symbol_short]
                     else:
                         send_telegram(f"❌ <b>Order Failed</b>\n\n{error}")
                 else:
@@ -1316,22 +1445,69 @@ class TelegramBotHandler:
 
 
 async def position_monitor():
-    """Monitor open positions and send updates"""
+    """Monitor open positions, update trailing SL, and send updates"""
     global trader
 
     print("📈 Position monitor started")
+    if TRAILING_STOP_ENABLED:
+        print(f"📈 Trailing stop enabled: {SWING_N} candle swing, {STOP_POINTS} buffer")
 
     last_report_time = 0
+    last_trail_update = {}  # {symbol: timestamp}
     report_interval = 60  # Report positions every 60 seconds
 
     while True:
         try:
             if trader:
                 positions = trader.get_positions()
-
                 current_time = time.time()
 
-                # Send periodic position updates if there are open positions
+                # ========== Trailing Stop Logic ==========
+                if TRAILING_STOP_ENABLED and positions:
+                    for pos in positions:
+                        symbol = pos['symbol']
+                        side = pos['side']  # 'long' or 'short'
+
+                        # Check if enough time passed since last trail update
+                        last_update = last_trail_update.get(symbol, 0)
+                        if current_time - last_update < TRAIL_UPDATE_INTERVAL:
+                            continue
+
+                        # Calculate new trailing SL
+                        new_sl = trader.calc_trailing_sl(symbol, side)
+                        if new_sl is None:
+                            continue
+
+                        # Get current SL from internal tracking
+                        tracked = trader.positions.get(symbol, {})
+                        current_sl = tracked.get('sl_price')
+                        current_tp = tracked.get('tp_price')
+
+                        if current_sl is None:
+                            # First time - set initial SL
+                            current_sl = new_sl
+
+                        # Apply clamp rule: SL only moves in favorable direction
+                        if side == 'long':
+                            final_sl = max(current_sl, new_sl)  # SL can only go UP
+                        else:
+                            final_sl = min(current_sl, new_sl)  # SL can only go DOWN
+
+                        # Only update if SL changed meaningfully (> 0.05%)
+                        if abs(final_sl - current_sl) / current_sl > 0.0005:
+                            success = trader.update_position_sl(symbol, final_sl, current_tp)
+                            if success:
+                                # Update internal tracking
+                                if symbol in trader.positions:
+                                    trader.positions[symbol]['sl_price'] = final_sl
+                                last_trail_update[symbol] = current_time
+
+                                # Notify via Telegram (optional)
+                                symbol_short = symbol.replace('/USDT:USDT', '').replace(':USDT', '')
+                                direction = "⬆️" if side == 'long' else "⬇️"
+                                send_telegram(f"{direction} <b>SL Trailed</b>: {symbol_short}\nNew SL: ${final_sl:.4f}")
+
+                # ========== Position Report ==========
                 if positions and (current_time - last_report_time) >= report_interval:
                     msg = "📊 <b>Position Update</b>\n\n"
 
@@ -1405,6 +1581,7 @@ async def main():
     telegram_handler = TelegramBotHandler()
 
     # Send startup message
+    trail_status = "ON" if TRAILING_STOP_ENABLED else "OFF"
     startup_msg = f"""🚀 <b>Bybit VWAP Monitor Started</b>
 
 Monitoring top {TOP_OI_COUNT} OI symbols
@@ -1414,7 +1591,8 @@ Check Interval: {CHECK_INTERVAL}s
 <b>Trading Settings:</b>
 Leverage: {LEVERAGE}x
 Order Size: ${ORDER_SIZE_USDT}
-TP: {TP_PERCENT}% | SL: {SL_PERCENT}%
+TP: VWAP target
+SL: Trailing ({SWING_N} candle swing) [{trail_status}]
 
 <i>Send /help for commands</i>"""
     send_telegram(startup_msg)
