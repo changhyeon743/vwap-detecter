@@ -66,7 +66,10 @@ MIN_VOL_RATIO = float(os.getenv('MIN_VOL_RATIO', '0.25'))
 NO_TRADE_AROUND_0900 = os.getenv('NO_TRADE_AROUND_0900', 'true').lower() == 'true'
 
 # VWAP Session Reset Timezone (must match TradingView)
-SESSION_TIMEZONE = os.getenv('SESSION_TIMEZONE', 'Asia/Seoul')
+SESSION_TIMEZONE = os.getenv('SESSION_TIMEZONE', 'UTC')
+
+# Chart Display Timezone (for x-axis labels)
+DISPLAY_TIMEZONE = os.getenv('DISPLAY_TIMEZONE', 'Asia/Seoul')
 
 # Debug Mode
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
@@ -127,8 +130,10 @@ def generate_chart(df, symbol, timeframe, signal=None, save_path=None):
     df = df.tail(150).copy()
     df = df.reset_index(drop=True)
 
-    # Convert timestamp to datetime
-    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+    # Convert timestamp to datetime in display timezone (for chart labels)
+    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+    tz = pytz.timezone(DISPLAY_TIMEZONE)
+    df['datetime'] = df['datetime'].dt.tz_convert(tz)
 
     fig, ax = plt.subplots(figsize=(14, 8))
 
@@ -683,7 +688,8 @@ class BybitMonitor:
         print(f"⏱️  Timeframes: {', '.join(TIMEFRAMES)}")
         print(f"🔄 Check interval: {CHECK_INTERVAL}s")
         print(f"\n📋 Strategy Parameters:")
-        print(f"   Session Timezone: {SESSION_TIMEZONE} (VWAP resets at 00:00)")
+        print(f"   Session Timezone: {SESSION_TIMEZONE} (VWAP resets at 00:00 {SESSION_TIMEZONE})")
+        print(f"   Display Timezone: {DISPLAY_TIMEZONE} (chart x-axis)")
         print(f"   Stop Points: {STOP_POINTS}")
         print(f"   Band Entry Mult: {BAND_ENTRY_MULT}")
         print(f"   Exit Mode Long: {EXIT_MODE_LONG}")
