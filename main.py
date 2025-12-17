@@ -510,14 +510,16 @@ class BybitTrader:
                 params['tpTriggerBy'] = 'LastPrice'
 
             response = self.exchange.private_post_v5_position_trading_stop(params)
-            ok = response.get('retCode') == 0
+            ret_code = response.get('retCode')
 
-            if ok:
+            if ret_code == 0:
                 print(f"✅ SL updated to ${new_sl:.4f} for {bybit_symbol}")
+                return True
+            elif ret_code == 34040:  # "not modified" - SL is same, not an error
+                return True  # Silent success
             else:
                 print(f"⚠️ SL update: {response.get('retMsg', response)}")
-
-            return ok
+                return False
 
         except Exception as e:
             print(f"❌ SL update failed: {e}")
