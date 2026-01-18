@@ -152,6 +152,10 @@ class Settings:
     def sl_buffer_atr_mult(self):
         return self._settings.get('trading', {}).get('sl_buffer_atr_mult', 0.5)
 
+    @property
+    def auto_trade(self):
+        return self._settings.get('trading', {}).get('auto_trade', False)
+
     # Strategy settings
     @property
     def band_entry_mult(self):
@@ -1392,7 +1396,66 @@ class BybitMonitor:
                 'timeframe': timeframe,
                 'timestamp': time.time()
             }
-    
+
+    def auto_execute_trade(self, symbol, timeframe, signal, chart_path=None):
+        """Auto-execute trade immediately when signal detected"""
+        global trader
+
+        signal_type = signal['type']
+        clean_symbol = symbol.replace(':USDT', '').replace('/USDT', '')
+
+        print(f"\n🤖 AUTO TRADE: Executing {signal_type} for {clean_symbol}")
+
+        # Execute trade
+        result, error = trader.execute_signal_trade(
+            symbol,
+            signal_type,
+            tp_target=signal.get('target'),
+            sl_initial=signal.get('stop_loss'),
+            timeframe=timeframe
+        )
+
+        if result:
+            entry = result['entry_price']
+            qty = result['quantity']
+            tp_price = result['tp_sl'].get('tp_price') if result['tp_sl'] else signal.get('target')
+            sl_actual = result['tp_sl'].get('sl_price') if result['tp_sl'] else signal.get('stop_loss')
+
+            tp_str = f"${tp_price:.4f}" if tp_price else "Not set"
+            sl_str = f"${sl_actual:.4f}" if sl_actual else "Not set"
+
+            msg = f"""🤖 <b>AUTO TRADE EXECUTED</b>
+
+<b>Symbol:</b> {clean_symbol}
+<b>Side:</b> {signal_type}
+<b>Entry:</b> ${entry:.4f}
+<b>Quantity:</b> {qty}
+<b>Leverage:</b> {settings.leverage}x
+
+<b>TP:</b> {tp_str} (VWAP)
+<b>SL:</b> {sl_str} (ATR-based)
+
+<b>Signal Strength:</b> {signal.get('strength', 0):.2%}
+<b>Safety Exit:</b> {settings.num_opposing_bars} opposing bars
+
+<i>Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</i>"""
+
+            # Send chart if available
+            if chart_path:
+                send_telegram_photo(chart_path, msg)
+            else:
+                send_telegram(msg)
+
+            print(f"✅ AUTO TRADE: {signal_type} executed at ${entry:.4f}")
+        else:
+            error_msg = f"""❌ <b>AUTO TRADE FAILED</b>
+
+<b>Symbol:</b> {clean_symbol}
+<b>Side:</b> {signal_type}
+<b>Error:</b> {error}"""
+            send_telegram(error_msg)
+            print(f"❌ AUTO TRADE FAILED: {error}")
+
     async def check_symbol(self, symbol):
         """Check a symbol across all timeframes"""
         for timeframe in settings.timeframes:
@@ -1458,8 +1521,13 @@ class BybitMonitor:
                             print(f"⚠️ Chart generation failed: {chart_err}")
                             chart_path = None
 
-                    # Send signal with trade buttons
-                    self.send_signal_with_buttons(symbol, timeframe, signal, chart_path)
+                    # Auto trade or send signal with buttons
+                    if settings.auto_trade and trader:
+                        # AUTO TRADE: Execute immediately
+                        self.auto_execute_trade(symbol, timeframe, signal, chart_path)
+                    else:
+                        # Manual: Send signal with buttons
+                        self.send_signal_with_buttons(symbol, timeframe, signal, chart_path)
 
                     # Add to signal history for HTML viewer
                     self.add_signal_to_history(symbol, timeframe, signal['type'])

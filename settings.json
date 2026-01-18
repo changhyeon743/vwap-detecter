@@ -3,7 +3,8 @@
     "leverage": 4,
     "order_size_usdt": 400,
     "position_check_interval": 5,
-    "sl_buffer_atr_mult": 0.5
+    "sl_buffer_atr_mult": 0.5,
+    "auto_trade": true
   },
   "strategy": {
     "band_entry_mult": 2.0,

@@ -153,9 +153,10 @@
         <div class="sidebar-header"><h2>Settings</h2></div>
         <div class="sidebar-content">
             <div class="section"><h3>Trading</h3>
+                <div class="row"><label>Auto Trade</label><input type="checkbox" id="s_auto"></div>
                 <div class="row"><label>Leverage</label><input type="number" id="s_lev" min="1" max="100"></div>
                 <div class="row"><label>Size (USDT)</label><input type="number" id="s_size" min="1"></div>
-                <div class="row"><label>SL Buffer</label><input type="number" id="s_slbuf" min="0" step="0.5"></div>
+                <div class="row"><label>SL ATR Mult</label><input type="number" id="s_slbuf" min="0" step="0.1"></div>
             </div>
             <div class="section"><h3>Strategy</h3>
                 <div class="row"><label>Band Mult</label><input type="number" id="s_band" min="0.5" max="5" step="0.1"></div>
@@ -298,9 +299,10 @@ async function loadSettings() {
 
 function populateSettings() {
     const s = settings;
+    document.getElementById('s_auto').checked = s.trading?.auto_trade === true;
     document.getElementById('s_lev').value = s.trading?.leverage || 20;
     document.getElementById('s_size').value = s.trading?.order_size_usdt || 100;
-    document.getElementById('s_slbuf').value = s.trading?.sl_buffer_points || 20;
+    document.getElementById('s_slbuf').value = s.trading?.sl_buffer_atr_mult || 0.5;
     document.getElementById('s_band').value = s.strategy?.band_entry_mult || 2.0;
     document.getElementById('s_exl').value = s.strategy?.exit_mode_long || 'VWAP';
     document.getElementById('s_exs').value = s.strategy?.exit_mode_short || 'VWAP';
@@ -321,7 +323,7 @@ function populateSettings() {
 function collectSettings() {
     const tfs = []; document.querySelectorAll('.chip.on').forEach(c => tfs.push(c.dataset.tf));
     return {
-        trading: { leverage: +document.getElementById('s_lev').value, order_size_usdt: +document.getElementById('s_size').value, position_check_interval: settings.trading?.position_check_interval||10, sl_buffer_points: +document.getElementById('s_slbuf').value },
+        trading: { auto_trade: document.getElementById('s_auto').checked, leverage: +document.getElementById('s_lev').value, order_size_usdt: +document.getElementById('s_size').value, position_check_interval: settings.trading?.position_check_interval||10, sl_buffer_atr_mult: +document.getElementById('s_slbuf').value },
         strategy: { band_entry_mult: +document.getElementById('s_band').value, exit_mode_long: document.getElementById('s_exl').value, exit_mode_short: document.getElementById('s_exs').value, target_long_deviation: settings.strategy?.target_long_deviation||2.0, target_short_deviation: settings.strategy?.target_short_deviation||2.0, min_strength: +document.getElementById('s_str').value, min_vol_ratio: +document.getElementById('s_vol').value },
         safety_exit: { enabled: document.getElementById('s_safe').checked, num_opposing_bars: +document.getElementById('s_bars').value },
         trade_direction: { allow_longs: document.getElementById('s_long').checked, allow_shorts: document.getElementById('s_short').checked },
