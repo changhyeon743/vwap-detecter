@@ -818,8 +818,25 @@ def start_chart_server():
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 symbols = api_live_data.get('symbols', [])
-                # Extract symbol names
                 symbol_list = [s['symbol'] if isinstance(s, dict) else s for s in symbols]
+
+                # If no symbols yet, fetch top OI symbols directly
+                if not symbol_list:
+                    try:
+                        global api_exchange
+                        if api_exchange is None:
+                            init_api_exchange()
+                        tickers = api_exchange.fetch_tickers()
+                        usdt_symbols = []
+                        for symbol, ticker in tickers.items():
+                            if ':USDT' in symbol and ticker.get('info', {}).get('openInterest'):
+                                oi = float(ticker['info']['openInterest'])
+                                usdt_symbols.append({'symbol': symbol, 'oi_value': oi * (ticker['last'] or 0)})
+                        usdt_symbols.sort(key=lambda x: x['oi_value'], reverse=True)
+                        symbol_list = [s['symbol'] for s in usdt_symbols[:settings.top_oi_count]]
+                    except Exception as e:
+                        print(f"Error fetching symbols: {e}")
+
                 self.wfile.write(json.dumps({'symbols': symbol_list}).encode())
 
             elif path == '/api/ohlcv':
