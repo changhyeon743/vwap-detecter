@@ -1,2 +1,6 @@
 charts/**
 .env
+data/
+results/
+__pycache__/
+*.pyc
