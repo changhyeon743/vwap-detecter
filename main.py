@@ -852,7 +852,6 @@ def start_chart_server():
                     return
 
                 try:
-                    global api_exchange
                     if api_exchange is None:
                         init_api_exchange()
 
