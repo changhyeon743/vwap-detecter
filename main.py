@@ -22,6 +22,15 @@ from dotenv import load_dotenv
 import ccxt
 import requests
 import matplotlib
+
+# Import backtest modules for SQLite data management
+try:
+    from backtest.database import init_db, get_ohlcv, upsert_ohlcv, get_latest_timestamp
+    from backtest.collector import DataCollector, get_collector, start_collector
+    USE_SQLITE = True
+except ImportError:
+    USE_SQLITE = False
+    print("Warning: backtest module not found, using direct API calls")
 matplotlib.use('Agg')  # Non-interactive backend for server
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -1286,10 +1295,23 @@ class BybitMonitor:
             return []
     
     def fetch_ohlcv(self, symbol, timeframe, limit=1000):
-        """Fetch OHLCV data"""
+        """Fetch OHLCV data from SQLite (if available) or API"""
         try:
+            # Try SQLite first if available
+            if USE_SQLITE:
+                df = get_ohlcv(symbol, timeframe, limit=limit)
+                if df is not None and len(df) >= limit * 0.8:  # At least 80% of requested
+                    return df
+                # Fall through to API if not enough data
+
+            # Fallback to API
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+            # Store in SQLite for future use
+            if USE_SQLITE and ohlcv:
+                upsert_ohlcv(symbol, timeframe, ohlcv)
+
             return df
         except Exception as e:
             print(f"❌ Error fetching {symbol} {timeframe}: {e}")
@@ -1878,6 +1900,11 @@ async def main():
         print("Please set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env file")
         return
 
+    # Initialize SQLite database
+    if USE_SQLITE:
+        init_db()
+        print("📦 SQLite database initialized")
+
     # Initialize trader
     if BYBIT_API_KEY and BYBIT_API_SECRET:
         init_trader()
@@ -1888,6 +1915,14 @@ async def main():
     if settings.send_chart:
         server_thread = threading.Thread(target=start_chart_server, daemon=True)
         server_thread.start()
+
+    # Start background data collector
+    if USE_SQLITE:
+        collector = get_collector()
+        for tf in settings.timeframes:
+            collector.add_symbol('BTC/USDT:USDT', tf)  # Main symbol
+        collector.start(interval=60)
+        print("📡 Background data collector started")
 
     # Create tasks
     monitor = BybitMonitor()
