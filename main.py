@@ -14,6 +14,7 @@ import socketserver
 import json
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
+from pathlib import Path
 import pytz
 import numpy as np
 import pandas as pd
@@ -29,70 +30,209 @@ from matplotlib.patches import Rectangle
 # Load environment variables
 load_dotenv()
 
-# Configuration
+# API Keys from .env (secrets stay in .env)
 BYBIT_API_KEY = os.getenv('BYBIT_API_KEY', '')
 BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET', '')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# Trading Settings
-LEVERAGE = int(os.getenv('LEVERAGE', '20'))
-ORDER_SIZE_USDT = float(os.getenv('ORDER_SIZE_USDT', '100'))  # Margin size in USDT
-POSITION_CHECK_INTERVAL = int(os.getenv('POSITION_CHECK_INTERVAL', '10'))  # seconds
+# Settings file path
+SETTINGS_FILE = Path(__file__).parent / 'settings.json'
 
-# Trailing Stop Settings (1m Swing Strategy)
-# TP = Signal's VWAP target (no env needed)
-# SL = Trailing based on 1m swing + buffer
-TRAILING_STOP_ENABLED = os.getenv('TRAILING_STOP_ENABLED', 'true').lower() == 'true'
-SWING_N = int(os.getenv('SWING_N', '20'))  # Number of 1m candles for swing high/low
-TRAIL_UPDATE_INTERVAL = int(os.getenv('TRAIL_UPDATE_INTERVAL', '60'))  # seconds between SL updates
-SL_BUFFER_PERCENT = float(os.getenv('SL_BUFFER_PERCENT', '0.3'))  # Buffer as % of price (0.3% default)
+# Default settings
+DEFAULT_SETTINGS = {
+    "trading": {
+        "leverage": 20,
+        "order_size_usdt": 100,
+        "position_check_interval": 10,
+        "sl_buffer_points": 20.0
+    },
+    "strategy": {
+        "band_entry_mult": 2.0,
+        "exit_mode_long": "VWAP",
+        "exit_mode_short": "VWAP",
+        "target_long_deviation": 2.0,
+        "target_short_deviation": 2.0,
+        "min_strength": 0.7,
+        "min_vol_ratio": 0.05
+    },
+    "safety_exit": {
+        "enabled": True,
+        "num_opposing_bars": 2
+    },
+    "trade_direction": {
+        "allow_longs": True,
+        "allow_shorts": True
+    },
+    "monitor": {
+        "timeframes": ["3m", "5m", "15m"],
+        "top_oi_count": 20,
+        "check_interval": 60
+    },
+    "filters": {
+        "no_trade_around_0900": True
+    },
+    "timezone": {
+        "session_timezone": "UTC",
+        "display_timezone": "Asia/Seoul"
+    },
+    "display": {
+        "debug_mode": False,
+        "send_chart": False,
+        "chart_server_port": 8080
+    }
+}
 
-# Monitor Settings
-TIMEFRAMES = os.getenv('TIMEFRAMES', '3m,5m,15m').split(',')
-TOP_OI_COUNT = int(os.getenv('TOP_OI_COUNT', '20'))
-CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '60'))
 
-# VWAP Strategy Parameters
-BAND_ENTRY_MULT = float(os.getenv('BAND_ENTRY_MULT', '2.0'))
+class Settings:
+    """Settings manager that loads from JSON and provides easy access"""
 
-# Exit Mode: "VWAP", "Deviation Band", or "None"
-EXIT_MODE_LONG = os.getenv('EXIT_MODE_LONG', 'VWAP')
-EXIT_MODE_SHORT = os.getenv('EXIT_MODE_SHORT', 'VWAP')
+    def __init__(self):
+        self._settings = {}
+        self.load()
 
-# Target Deviation (used when Exit Mode is "Deviation Band")
-TARGET_LONG_DEVIATION = float(os.getenv('TARGET_LONG_DEVIATION', '2.0'))
-TARGET_SHORT_DEVIATION = float(os.getenv('TARGET_SHORT_DEVIATION', '2.0'))
+    def load(self):
+        """Load settings from JSON file"""
+        try:
+            if SETTINGS_FILE.exists():
+                with open(SETTINGS_FILE, 'r') as f:
+                    self._settings = json.load(f)
+                print(f"✅ Settings loaded from {SETTINGS_FILE}")
+            else:
+                self._settings = DEFAULT_SETTINGS.copy()
+                self.save()
+                print(f"✅ Created default settings file")
+        except Exception as e:
+            print(f"⚠️ Error loading settings: {e}, using defaults")
+            self._settings = DEFAULT_SETTINGS.copy()
 
-# Safety Exit
-ENABLE_SAFETY_EXIT = os.getenv('ENABLE_SAFETY_EXIT', 'true').lower() == 'true'
-NUM_OPPOSING_BARS = int(os.getenv('NUM_OPPOSING_BARS', '3'))
+    def save(self):
+        """Save current settings to JSON file"""
+        try:
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(self._settings, f, indent=2)
+            print(f"✅ Settings saved to {SETTINGS_FILE}")
+            return True
+        except Exception as e:
+            print(f"❌ Error saving settings: {e}")
+            return False
 
-# Trade Direction
-ALLOW_LONGS = os.getenv('ALLOW_LONGS', 'true').lower() == 'true'
-ALLOW_SHORTS = os.getenv('ALLOW_SHORTS', 'true').lower() == 'true'
+    def update(self, new_settings):
+        """Update settings and save"""
+        self._settings = new_settings
+        return self.save()
 
-# Signal Strength & Volatility Filter
-MIN_STRENGTH = float(os.getenv('MIN_STRENGTH', '0.7'))
-MIN_VOL_RATIO = float(os.getenv('MIN_VOL_RATIO', '0.25'))
+    def to_dict(self):
+        """Return settings as dictionary"""
+        return self._settings.copy()
 
-# No Trade Window Around 09:00 KST
-NO_TRADE_AROUND_0900 = os.getenv('NO_TRADE_AROUND_0900', 'true').lower() == 'true'
+    # Trading settings
+    @property
+    def leverage(self):
+        return self._settings.get('trading', {}).get('leverage', 20)
 
-# VWAP Session Reset Timezone (must match TradingView)
-SESSION_TIMEZONE = os.getenv('SESSION_TIMEZONE', 'UTC')
+    @property
+    def order_size_usdt(self):
+        return self._settings.get('trading', {}).get('order_size_usdt', 100)
 
-# Chart Display Timezone (for x-axis labels)
-DISPLAY_TIMEZONE = os.getenv('DISPLAY_TIMEZONE', 'Asia/Seoul')
+    @property
+    def position_check_interval(self):
+        return self._settings.get('trading', {}).get('position_check_interval', 10)
 
-# Debug Mode
-DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
+    @property
+    def sl_buffer_points(self):
+        return self._settings.get('trading', {}).get('sl_buffer_points', 20.0)
 
-# Chart Generation
-SEND_CHART = os.getenv('SEND_CHART', 'false').lower() == 'true'
+    # Strategy settings
+    @property
+    def band_entry_mult(self):
+        return self._settings.get('strategy', {}).get('band_entry_mult', 2.0)
 
-# Chart Viewer Server
-CHART_SERVER_PORT = int(os.getenv('CHART_SERVER_PORT', '8080'))
+    @property
+    def exit_mode_long(self):
+        return self._settings.get('strategy', {}).get('exit_mode_long', 'VWAP')
+
+    @property
+    def exit_mode_short(self):
+        return self._settings.get('strategy', {}).get('exit_mode_short', 'VWAP')
+
+    @property
+    def target_long_deviation(self):
+        return self._settings.get('strategy', {}).get('target_long_deviation', 2.0)
+
+    @property
+    def target_short_deviation(self):
+        return self._settings.get('strategy', {}).get('target_short_deviation', 2.0)
+
+    @property
+    def min_strength(self):
+        return self._settings.get('strategy', {}).get('min_strength', 0.7)
+
+    @property
+    def min_vol_ratio(self):
+        return self._settings.get('strategy', {}).get('min_vol_ratio', 0.05)
+
+    # Safety exit
+    @property
+    def enable_safety_exit(self):
+        return self._settings.get('safety_exit', {}).get('enabled', True)
+
+    @property
+    def num_opposing_bars(self):
+        return self._settings.get('safety_exit', {}).get('num_opposing_bars', 2)
+
+    # Trade direction
+    @property
+    def allow_longs(self):
+        return self._settings.get('trade_direction', {}).get('allow_longs', True)
+
+    @property
+    def allow_shorts(self):
+        return self._settings.get('trade_direction', {}).get('allow_shorts', True)
+
+    # Monitor settings
+    @property
+    def timeframes(self):
+        return self._settings.get('monitor', {}).get('timeframes', ['3m', '5m', '15m'])
+
+    @property
+    def top_oi_count(self):
+        return self._settings.get('monitor', {}).get('top_oi_count', 20)
+
+    @property
+    def check_interval(self):
+        return self._settings.get('monitor', {}).get('check_interval', 60)
+
+    # Filters
+    @property
+    def no_trade_around_0900(self):
+        return self._settings.get('filters', {}).get('no_trade_around_0900', True)
+
+    # Timezone
+    @property
+    def session_timezone(self):
+        return self._settings.get('timezone', {}).get('session_timezone', 'UTC')
+
+    @property
+    def display_timezone(self):
+        return self._settings.get('timezone', {}).get('display_timezone', 'Asia/Seoul')
+
+    # Display
+    @property
+    def debug_mode(self):
+        return self._settings.get('display', {}).get('debug_mode', False)
+
+    @property
+    def send_chart(self):
+        return self._settings.get('display', {}).get('send_chart', False)
+
+    @property
+    def chart_server_port(self):
+        return self._settings.get('display', {}).get('chart_server_port', 8080)
+
+
+# Global settings instance
+settings = Settings()
 
 # Telegram notification
 def send_telegram(message):
@@ -188,8 +328,10 @@ class BybitTrader:
         self.positions = {}  # Track open positions
         self.pending_signals = {}  # Signals waiting for user action
 
-    def set_leverage(self, symbol, leverage=LEVERAGE):
+    def set_leverage(self, symbol, leverage=None):
         """Set leverage for a symbol"""
+        if leverage is None:
+            leverage = settings.leverage
         try:
             # Convert symbol format (BTC/USDT:USDT -> BTCUSDT)
             market_symbol = symbol.replace('/USDT:USDT', 'USDT').replace(':USDT', '')
@@ -231,7 +373,7 @@ class BybitTrader:
 
             # Calculate quantity: margin * leverage = position size
             # e.g., $100 margin * 20x = $2000 position
-            position_value = usdt_amount * LEVERAGE
+            position_value = usdt_amount * settings.leverage
             quantity = position_value / price
 
             # Round to precision
@@ -267,16 +409,18 @@ class BybitTrader:
         """
         Place Take Profit and Stop Loss using Bybit's position TP/SL
         - tp_price: Signal's VWAP target (uses fallback if None)
-        - sl_price: Signal's initial stop loss (uses swing-based if None)
+        - sl_price: Signal bar high/low ± buffer (required)
         """
         try:
             print(f"🔧 place_tp_sl called: side={side}, entry={entry_price}, tp={tp_price}, sl={sl_price}")
 
-            # Fallback: calculate SL from 1m swing if not provided
+            # SL must be provided (signal bar based)
             if sl_price is None:
-                print(f"🔧 SL is None, calculating from swing...")
-                sl_price = self.calc_trailing_sl(symbol, 'long' if side == 'buy' else 'short')
-                print(f"🔧 Swing SL result: {sl_price}")
+                print(f"⚠️ SL not provided, using entry ± 1% fallback")
+                if side == 'buy':
+                    sl_price = entry_price * 0.99
+                else:
+                    sl_price = entry_price * 1.01
 
             # Fallback: calculate TP from percentage if not provided
             if tp_price is None:
@@ -287,11 +431,7 @@ class BybitTrader:
                     tp_price = entry_price * 0.97
                 print(f"🔧 Fallback TP: {tp_price}")
 
-            if tp_price is None or sl_price is None:
-                print(f"❌ Could not calculate TP/SL: tp={tp_price}, sl={sl_price}")
-                return None
-
-            print(f"📊 Setting TP=${tp_price:.4f} / SL=${sl_price:.4f}")
+            print(f"📊 Setting TP=${tp_price:.4f} / SL=${sl_price:.4f} (signal bar)")
 
             # Round prices
             market = self.exchange.market(symbol)
@@ -330,17 +470,18 @@ class BybitTrader:
             return {'tp_price': tp_price if 'tp_price' in locals() else None,
                     'sl_price': sl_price if 'sl_price' in locals() else None}
 
-    def execute_signal_trade(self, symbol, signal_type, tp_target=None, sl_initial=None):
+    def execute_signal_trade(self, symbol, signal_type, tp_target=None, sl_initial=None, timeframe=None):
         """
         Execute a trade based on signal with TP/SL
         - tp_target: VWAP target from signal
-        - sl_initial: Initial stop loss from signal (will be trailed)
+        - sl_initial: Signal bar high/low ± buffer
+        - timeframe: Timeframe for Safety Exit checking
         """
         try:
             side = 'buy' if signal_type == 'LONG' else 'sell'
 
             print(f"🔄 Executing {signal_type} for {symbol}")
-            print(f"📊 Order size: ${ORDER_SIZE_USDT} | Leverage: {LEVERAGE}x")
+            print(f"📊 Order size: ${settings.order_size_usdt} | Leverage: {settings.leverage}x")
 
             # Get current price first (for fallback and logging)
             current_price = self.get_ticker_price(symbol)
@@ -348,7 +489,7 @@ class BybitTrader:
                 return None, "Could not get current price"
             print(f"💰 Current price: ${current_price:.4f}")
 
-            quantity = self.calculate_quantity(symbol, ORDER_SIZE_USDT)
+            quantity = self.calculate_quantity(symbol, settings.order_size_usdt)
             if not quantity:
                 return None, "Failed to calculate quantity"
 
@@ -385,7 +526,8 @@ class BybitTrader:
                 'quantity': quantity,
                 'entry_time': datetime.now(timezone.utc),
                 'tp_price': tp_sl.get('tp_price') if tp_sl else tp_target,
-                'sl_price': tp_sl.get('sl_price') if tp_sl else sl_initial
+                'sl_price': tp_sl.get('sl_price') if tp_sl else sl_initial,
+                'timeframe': timeframe or settings.timeframes[0]  # For Safety Exit checking
             }
 
             return {
@@ -441,106 +583,45 @@ class BybitTrader:
             print(f"❌ Error closing position: {e}")
             return None
 
-    # ========== Trailing Stop Methods ==========
+    # ========== Safety Exit Methods ==========
 
-    def fetch_1m_ohlcv(self, symbol, limit=50):
-        """Fetch 1-minute OHLCV data for trailing stop"""
+    def fetch_ohlcv_for_safety(self, symbol, timeframe, limit=10):
+        """Fetch OHLCV data to check for opposing bars"""
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, '1m', limit=limit)
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             return df
         except Exception as e:
-            print(f"⚠️ Error fetching 1m data: {e}")
+            print(f"⚠️ Error fetching {timeframe} data for safety exit: {e}")
             return None
 
-    def calc_trailing_sl(self, symbol, side, entry_price=None):
+    def check_safety_exit(self, symbol, side, timeframe):
         """
-        Calculate new SL based on 1m swing high/low + buffer
-        - Long: SL = swing_low - buffer (only moves UP)
-        - Short: SL = swing_high + buffer (only moves DOWN)
-
-        Buffer is percentage-based (works for any coin price)
+        Check if we should exit due to consecutive opposing bars
+        - Long: exit if N consecutive bearish bars (close < open)
+        - Short: exit if N consecutive bullish bars (close > open)
         """
-        df = self.fetch_1m_ohlcv(symbol, limit=SWING_N + 10)
-        if df is None or len(df) < SWING_N:
-            return None
+        df = self.fetch_ohlcv_for_safety(symbol, timeframe, limit=settings.num_opposing_bars + 2)
+        if df is None or len(df) < settings.num_opposing_bars:
+            return False
 
-        # Get last N candles (exclude current incomplete candle)
-        recent = df.tail(SWING_N + 1).head(SWING_N)
-        current_price = df.iloc[-1]['close']
-
-        # Buffer as percentage of price (e.g., 0.3% of $100,000 = $300)
-        buffer = current_price * (SL_BUFFER_PERCENT / 100)
+        # Get last N completed bars (exclude current incomplete bar)
+        recent = df.tail(settings.num_opposing_bars + 1).head(settings.num_opposing_bars)
 
         if side == 'long':
-            swing_low = recent['low'].min()
-            new_sl = swing_low - buffer
-
-            # Safety: SL must be below current price by at least buffer
-            max_sl = current_price - buffer
-            if new_sl > max_sl:
-                new_sl = max_sl
-
+            # Check for N consecutive bearish bars
+            bearish_count = sum(1 for _, row in recent.iterrows() if row['close'] < row['open'])
+            if bearish_count == settings.num_opposing_bars:
+                print(f"⚠️ Safety Exit triggered: {settings.num_opposing_bars} consecutive bearish bars for LONG")
+                return True
         else:  # short
-            swing_high = recent['high'].max()
-            new_sl = swing_high + buffer
-
-            # Safety: SL must be above current price by at least buffer
-            min_sl = current_price + buffer
-            if new_sl < min_sl:
-                new_sl = min_sl
-
-        return new_sl
-
-    def update_position_sl(self, symbol, new_sl, current_tp=None):
-        """Update stop-loss on Bybit position"""
-        try:
-            bybit_symbol = symbol.replace('/USDT:USDT', 'USDT').replace(':USDT', '')
-
-            # If no TP provided, fetch from Bybit to preserve it
-            if current_tp is None:
-                try:
-                    response = self.exchange.private_get_v5_position_list({
-                        'category': 'linear',
-                        'symbol': bybit_symbol
-                    })
-                    if response.get('retCode') == 0:
-                        pos_list = response.get('result', {}).get('list', [])
-                        if pos_list:
-                            current_tp = pos_list[0].get('takeProfit')
-                            if current_tp:
-                                current_tp = float(current_tp)
-                except Exception as e:
-                    print(f"⚠️ Could not fetch current TP: {e}")
-
-            params = {
-                'category': 'linear',
-                'symbol': bybit_symbol,
-                'stopLoss': str(new_sl),
-                'slTriggerBy': 'LastPrice',
-                'tpslMode': 'Full',
-                'positionIdx': 0,
-            }
-
-            if current_tp is not None and float(current_tp) > 0:
-                params['takeProfit'] = str(current_tp)
-                params['tpTriggerBy'] = 'LastPrice'
-
-            response = self.exchange.private_post_v5_position_trading_stop(params)
-            ret_code = response.get('retCode')
-
-            if ret_code == 0:
-                print(f"✅ SL updated to ${new_sl:.4f} for {bybit_symbol}")
+            # Check for N consecutive bullish bars
+            bullish_count = sum(1 for _, row in recent.iterrows() if row['close'] > row['open'])
+            if bullish_count == settings.num_opposing_bars:
+                print(f"⚠️ Safety Exit triggered: {settings.num_opposing_bars} consecutive bullish bars for SHORT")
                 return True
-            elif ret_code == 34040:  # "not modified" - SL unchanged
-                return True
-            else:
-                print(f"⚠️ SL update: {response.get('retMsg', response)}")
-                return False
 
-        except Exception as e:
-            print(f"❌ SL update failed: {e}")
-            return False
+        return False
 
 
 # Global trader instance
@@ -552,7 +633,7 @@ def init_trader():
     global trader
     try:
         trader = BybitTrader()
-        print(f"✅ Trader initialized with {LEVERAGE}x leverage")
+        print(f"✅ Trader initialized with {settings.leverage}x leverage")
         return True
     except Exception as e:
         print(f"❌ Failed to initialize trader: {e}")
@@ -567,7 +648,7 @@ def generate_chart(df, symbol, timeframe, signal=None, save_path=None):
 
     # Convert timestamp to datetime in display timezone (for chart labels)
     df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-    tz = pytz.timezone(DISPLAY_TIMEZONE)
+    tz = pytz.timezone(settings.display_timezone)
     df['datetime'] = df['datetime'].dt.tz_convert(tz)
 
     fig, ax = plt.subplots(figsize=(14, 8))
@@ -601,9 +682,9 @@ def generate_chart(df, symbol, timeframe, signal=None, save_path=None):
 
     # Plot bands
     ax.plot(range(len(df)), df['upper_band'], color=band_color, linewidth=1.5,
-            linestyle='--', label=f'Upper Band ({BAND_ENTRY_MULT}σ)')
+            linestyle='--', label=f'Upper Band ({settings.band_entry_mult}σ)')
     ax.plot(range(len(df)), df['lower_band'], color=band_color, linewidth=1.5,
-            linestyle='--', label=f'Lower Band ({BAND_ENTRY_MULT}σ)')
+            linestyle='--', label=f'Lower Band ({settings.band_entry_mult}σ)')
 
     # Fill between bands
     ax.fill_between(range(len(df)), df['upper_band'], df['lower_band'],
@@ -688,21 +769,71 @@ def update_charts_index():
 
 
 def start_chart_server():
-    """Start HTTP server for chart viewer in background thread"""
-    class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    """Start HTTP server for chart viewer and settings API"""
+
+    class APIHandler(http.server.SimpleHTTPRequestHandler):
         def log_message(self, format, *args):
             # Suppress request logs
             pass
 
+        def do_GET(self):
+            """Handle GET requests including API"""
+            if self.path == '/api/settings':
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps(settings.to_dict()).encode())
+            else:
+                # Serve static files
+                super().do_GET()
+
+        def do_POST(self):
+            """Handle POST requests for settings API"""
+            if self.path == '/api/settings':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+
+                try:
+                    new_settings = json.loads(post_data.decode('utf-8'))
+                    success = settings.update(new_settings)
+
+                    self.send_response(200 if success else 500)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+
+                    response = {'success': success, 'message': 'Settings saved' if success else 'Failed to save'}
+                    self.wfile.write(json.dumps(response).encode())
+                except Exception as e:
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_OPTIONS(self):
+            """Handle CORS preflight"""
+            self.send_response(200)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+            self.end_headers()
+
     try:
-        with socketserver.TCPServer(("", CHART_SERVER_PORT), QuietHandler) as httpd:
-            print(f"📊 Chart viewer: http://localhost:{CHART_SERVER_PORT}/chart_viewer.html")
+        port = settings.chart_server_port
+        with socketserver.TCPServer(("", port), APIHandler) as httpd:
+            print(f"📊 Chart viewer: http://localhost:{port}/chart_viewer.html")
+            print(f"⚙️  Settings UI: http://localhost:{port}/settings.html")
             httpd.serve_forever()
     except OSError as e:
         if e.errno == 48:  # Address already in use
-            print(f"⚠️ Port {CHART_SERVER_PORT} already in use, chart server not started")
+            print(f"⚠️ Port {port} already in use, server not started")
         else:
-            print(f"⚠️ Chart server error: {e}")
+            print(f"⚠️ Server error: {e}")
 
 
 class VWAPStrategy:
@@ -721,7 +852,7 @@ class VWAPStrategy:
         # Convert to session timezone (must match TradingView chart timezone)
         # VWAP resets at 00:00 in this timezone
         try:
-            tz = pytz.timezone(SESSION_TIMEZONE)
+            tz = pytz.timezone(settings.session_timezone)
             df['datetime_local'] = df['datetime'].dt.tz_convert(tz)
             df['date'] = df['datetime_local'].dt.date
         except:
@@ -753,8 +884,8 @@ class VWAPStrategy:
         df['stdev'] = np.sqrt(df['variance'].clip(lower=0))
 
         # Calculate bands
-        df['upper_band'] = df['vwap'] + df['stdev'] * BAND_ENTRY_MULT
-        df['lower_band'] = df['vwap'] - df['stdev'] * BAND_ENTRY_MULT
+        df['upper_band'] = df['vwap'] + df['stdev'] * settings.band_entry_mult
+        df['lower_band'] = df['vwap'] - df['stdev'] * settings.band_entry_mult
 
         return df[['vwap', 'stdev', 'upper_band', 'lower_band']].reset_index(drop=True)
     
@@ -764,7 +895,7 @@ class VWAPStrategy:
             return None
 
         # Check for 09:00 KST no-trade window (±30 minutes)
-        if NO_TRADE_AROUND_0900:
+        if settings.no_trade_around_0900:
             from datetime import timezone, timedelta
             kst = timezone(timedelta(hours=9))
             now_kst = datetime.now(kst)
@@ -796,7 +927,7 @@ class VWAPStrategy:
         # Volatility filter
         if current['stdev'] > 0 and current['atr'] > 0:
             vol_ratio = current['stdev'] / current['atr']
-            if vol_ratio < MIN_VOL_RATIO:
+            if vol_ratio < settings.min_vol_ratio:
                 return None
         else:
             return None
@@ -828,47 +959,51 @@ class VWAPStrategy:
         # Check H1/H2 pattern (Long signal)
         # Pine: open < entryLower and close > entryLower
         is_h1h2 = (
-            ALLOW_LONGS and
+            settings.allow_longs and
             current['open'] < current['lower_band'] and
             current['close'] > current['lower_band'] and
-            bull_strength >= MIN_STRENGTH
+            bull_strength >= settings.min_strength
         )
 
         # Check L1/L2 pattern (Short signal)
         # Pine: open > entryUpper and close < entryUpper
         is_l1l2 = (
-            ALLOW_SHORTS and
+            settings.allow_shorts and
             current['open'] > current['upper_band'] and
             current['close'] < current['upper_band'] and
-            bear_strength >= MIN_STRENGTH
+            bear_strength >= settings.min_strength
         )
 
         # Debug: Show why signal conditions fail
         debug_info['long_conditions'] = {
             'open < lower_band': current['open'] < current['lower_band'],
             'close > lower_band': current['close'] > current['lower_band'],
-            'bull_strength >= min': bull_strength >= MIN_STRENGTH,
+            'bull_strength >= min': bull_strength >= settings.min_strength,
         }
         debug_info['short_conditions'] = {
             'open > upper_band': current['open'] > current['upper_band'],
             'close < upper_band': current['close'] < current['upper_band'],
-            'bear_strength >= min': bear_strength >= MIN_STRENGTH,
+            'bear_strength >= min': bear_strength >= settings.min_strength,
         }
 
         if is_h1h2:
             # Target based on exit mode
-            if EXIT_MODE_LONG == 'VWAP':
+            if settings.exit_mode_long == 'VWAP':
                 target = current['vwap']
-            elif EXIT_MODE_LONG == 'Deviation Band':
-                target = current['vwap'] + current['stdev'] * TARGET_LONG_DEVIATION
+            elif settings.exit_mode_long == 'Deviation Band':
+                target = current['vwap'] + current['stdev'] * settings.target_long_deviation
             else:
                 target = None
+            # SL = signal bar low - buffer (matches Pine Script)
+            stop_loss = current['low'] - settings.sl_buffer_points
             return {
                 'type': 'LONG',
                 'price': current['close'],
-                'stop_loss': None,  # Will use swing-based SL
+                'stop_loss': stop_loss,
+                'signal_low': current['low'],
+                'signal_high': current['high'],
                 'target': target,
-                'exit_mode': EXIT_MODE_LONG,
+                'exit_mode': settings.exit_mode_long,
                 'vwap': current['vwap'],
                 'strength': bull_strength,
                 'vol_ratio': vol_ratio,
@@ -877,25 +1012,29 @@ class VWAPStrategy:
 
         if is_l1l2:
             # Target based on exit mode
-            if EXIT_MODE_SHORT == 'VWAP':
+            if settings.exit_mode_short == 'VWAP':
                 target = current['vwap']
-            elif EXIT_MODE_SHORT == 'Deviation Band':
-                target = current['vwap'] - current['stdev'] * TARGET_SHORT_DEVIATION
+            elif settings.exit_mode_short == 'Deviation Band':
+                target = current['vwap'] - current['stdev'] * settings.target_short_deviation
             else:
                 target = None
+            # SL = signal bar high + buffer (matches Pine Script)
+            stop_loss = current['high'] + settings.sl_buffer_points
             return {
                 'type': 'SHORT',
                 'price': current['close'],
-                'stop_loss': None,  # Will use swing-based SL
+                'stop_loss': stop_loss,
+                'signal_low': current['low'],
+                'signal_high': current['high'],
                 'target': target,
-                'exit_mode': EXIT_MODE_SHORT,
+                'exit_mode': settings.exit_mode_short,
                 'vwap': current['vwap'],
                 'strength': bear_strength,
                 'vol_ratio': vol_ratio,
                 'debug': debug_info
             }
 
-        # Return debug info even when no signal (for DEBUG_MODE)
+        # Return debug info even when no signal (for settings.debug_mode)
         return {'type': None, 'debug': debug_info}
 
 
@@ -910,7 +1049,7 @@ class BybitMonitor:
         })
         self.strategy = VWAPStrategy()
         self.last_signals = {}  # Track last signal time to avoid spam
-        self.live_data = {'symbols': [], 'signals': {}, 'signal_history': [], 'timeframe': TIMEFRAMES[0]}
+        self.live_data = {'symbols': [], 'signals': {}, 'signal_history': [], 'timeframe': settings.timeframes[0]}
 
     def generate_live_chart(self, df, symbol, timeframe, signal=None):
         """Generate live chart for a symbol"""
@@ -977,10 +1116,10 @@ class BybitMonitor:
             
             # Sort by OI value and get top 20
             usdt_symbols.sort(key=lambda x: x['oi_value'], reverse=True)
-            top_symbols = [s['symbol'] for s in usdt_symbols[:TOP_OI_COUNT]]
+            top_symbols = [s['symbol'] for s in usdt_symbols[:settings.top_oi_count]]
             
-            print(f"📊 Top {TOP_OI_COUNT} OI symbols:")
-            for i, s in enumerate(usdt_symbols[:TOP_OI_COUNT], 1):
+            print(f"📊 Top {settings.top_oi_count} OI symbols:")
+            for i, s in enumerate(usdt_symbols[:settings.top_oi_count], 1):
                 print(f"  {i}. {s['symbol']}: ${s['oi_value']:,.0f}")
             
             return top_symbols
@@ -1011,6 +1150,12 @@ class BybitMonitor:
         else:
             target_line = f"<b>Target:</b> None (Exit Mode: {exit_mode})"
 
+        # Format SL line
+        if signal.get('stop_loss') is not None:
+            sl_line = f"<b>SL:</b> ${signal['stop_loss']:.4f} (signal bar)"
+        else:
+            sl_line = "<b>SL:</b> Signal bar ± {settings.sl_buffer_points} pts"
+
         message = f"""
 {emoji} <b>{signal_type} SIGNAL</b> {emoji}
 
@@ -1018,12 +1163,13 @@ class BybitMonitor:
 <b>Timeframe:</b> {timeframe}
 <b>Entry:</b> ${signal['price']:.4f}
 {target_line}
+{sl_line}
 
 <b>Signal Strength:</b> {signal['strength']:.2%}
 <b>Vol Ratio:</b> {signal['vol_ratio']:.2f}
 
-<b>Leverage:</b> {LEVERAGE}x | <b>Size:</b> ${ORDER_SIZE_USDT}
-<b>TP:</b> VWAP | <b>SL:</b> Swing trailing
+<b>Leverage:</b> {settings.leverage}x | <b>Size:</b> ${settings.order_size_usdt}
+<b>Safety Exit:</b> {settings.num_opposing_bars} opposing bars
 
 <i>Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</i>
 """
@@ -1060,13 +1206,16 @@ class BybitMonitor:
                 'signal_type': signal_type,
                 'price': signal['price'],
                 'target': signal.get('target'),  # VWAP target for TP
+                'stop_loss': signal.get('stop_loss'),  # Signal bar SL
+                'signal_low': signal.get('signal_low'),
+                'signal_high': signal.get('signal_high'),
                 'timeframe': timeframe,
                 'timestamp': time.time()
             }
     
     async def check_symbol(self, symbol):
         """Check a symbol across all timeframes"""
-        for timeframe in TIMEFRAMES:
+        for timeframe in settings.timeframes:
             try:
                 # Check if we recently sent signal for this symbol/timeframe
                 key = f"{symbol}_{timeframe}"
@@ -1088,7 +1237,7 @@ class BybitMonitor:
                     continue
 
                 # Debug output
-                if DEBUG_MODE and 'debug' in result:
+                if settings.debug_mode and 'debug' in result:
                     d = result['debug']
                     print(f"\n📊 {symbol} ({timeframe}):")
                     print(f"   O: {d['open']:.4f} | H: {d['high']:.4f} | L: {d['low']:.4f} | C: {d['close']:.4f}")
@@ -1106,7 +1255,7 @@ class BybitMonitor:
                     print(f"🎯 SIGNAL DETECTED: {symbol} ({timeframe})")
                     print(f"   Type: {signal['type']}")
                     print(f"   Entry: ${signal['price']:.4f}")
-                    print(f"   SL: Swing-based (trailing)")
+                    print(f"   SL: ${signal['stop_loss']:.4f} (signal bar)")
                     if signal['target'] is not None:
                         print(f"   TP ({signal['exit_mode']}): ${signal['target']:.4f}")
                     else:
@@ -1115,7 +1264,7 @@ class BybitMonitor:
 
                     # Generate and send chart with message and trade buttons
                     chart_path = None
-                    if SEND_CHART:
+                    if settings.send_chart:
                         try:
                             # Calculate VWAP data for chart
                             df_chart = df.reset_index(drop=True)
@@ -1144,30 +1293,31 @@ class BybitMonitor:
     async def monitor(self):
         """Main monitoring loop"""
         print(f"\n🚀 Starting Bybit VWAP Monitor")
-        print(f"📊 Monitoring top {TOP_OI_COUNT} OI symbols")
-        print(f"⏱️  Timeframes: {', '.join(TIMEFRAMES)}")
-        print(f"🔄 Check interval: {CHECK_INTERVAL}s")
+        print(f"📊 Monitoring top {settings.top_oi_count} OI symbols")
+        print(f"⏱️  Timeframes: {', '.join(settings.timeframes)}")
+        print(f"🔄 Check interval: {settings.check_interval}s")
         print(f"\n📋 Strategy Parameters:")
-        print(f"   Session Timezone: {SESSION_TIMEZONE} (VWAP resets at 00:00 {SESSION_TIMEZONE})")
-        print(f"   Display Timezone: {DISPLAY_TIMEZONE} (chart x-axis)")
-        print(f"   SL: Swing-based (trailing)")
-        print(f"   Band Entry Mult: {BAND_ENTRY_MULT}")
-        print(f"   Exit Mode Long: {EXIT_MODE_LONG}")
-        print(f"   Exit Mode Short: {EXIT_MODE_SHORT}")
-        print(f"   Min Strength: {MIN_STRENGTH}")
-        print(f"   Min Vol Ratio: {MIN_VOL_RATIO}")
-        print(f"   Allow Longs: {ALLOW_LONGS}")
-        print(f"   Allow Shorts: {ALLOW_SHORTS}")
-        print(f"   No Trade 09:00 KST: {NO_TRADE_AROUND_0900}")
-        print(f"   Debug Mode: {DEBUG_MODE}")
-        print(f"   Send Chart: {SEND_CHART}\n")
+        print(f"   Session Timezone: {settings.session_timezone} (VWAP resets at 00:00 {settings.session_timezone})")
+        print(f"   Display Timezone: {settings.display_timezone} (chart x-axis)")
+        print(f"   SL: Signal bar ± {settings.sl_buffer_points} pts")
+        print(f"   Safety Exit: {settings.num_opposing_bars} consecutive opposing bars")
+        print(f"   Band Entry Mult: {settings.band_entry_mult}")
+        print(f"   Exit Mode Long: {settings.exit_mode_long}")
+        print(f"   Exit Mode Short: {settings.exit_mode_short}")
+        print(f"   Min Strength: {settings.min_strength}")
+        print(f"   Min Vol Ratio: {settings.min_vol_ratio}")
+        print(f"   Allow Longs: {settings.allow_longs}")
+        print(f"   Allow Shorts: {settings.allow_shorts}")
+        print(f"   No Trade 09:00 KST: {settings.no_trade_around_0900}")
+        print(f"   Debug Mode: {settings.debug_mode}")
+        print(f"   Send Chart: {settings.send_chart}\n")
 
         send_telegram(f"""🚀 <b>Bybit VWAP Monitor Started</b>
 
-Monitoring top {TOP_OI_COUNT} OI symbols
-Timeframes: {', '.join(TIMEFRAMES)}
-Exit Mode Long: {EXIT_MODE_LONG}
-Exit Mode Short: {EXIT_MODE_SHORT}""")
+Monitoring top {settings.top_oi_count} OI symbols
+Timeframes: {', '.join(settings.timeframes)}
+Exit Mode Long: {settings.exit_mode_long}
+Exit Mode Short: {settings.exit_mode_short}""")
         
         while True:
             try:
@@ -1176,12 +1326,12 @@ Exit Mode Short: {EXIT_MODE_SHORT}""")
 
                 if not symbols:
                     print("⚠️ No symbols found, retrying...")
-                    await asyncio.sleep(CHECK_INTERVAL)
+                    await asyncio.sleep(settings.check_interval)
                     continue
 
                 # Process each symbol - check signals and generate live charts
                 symbols_data = []
-                timeframe = TIMEFRAMES[0]  # Use first timeframe for live charts
+                timeframe = settings.timeframes[0]  # Use first timeframe for live charts
 
                 for symbol in symbols:
                     # Check for signals (all timeframes)
@@ -1230,8 +1380,8 @@ Exit Mode Short: {EXIT_MODE_SHORT}""")
                 # Update live data for HTML viewer
                 self.update_live_data(symbols_data)
 
-                print(f"\n✅ Scan complete. Charts updated. Next scan in {CHECK_INTERVAL}s...")
-                await asyncio.sleep(CHECK_INTERVAL)
+                print(f"\n✅ Scan complete. Charts updated. Next scan in {settings.check_interval}s...")
+                await asyncio.sleep(settings.check_interval)
 
             except KeyboardInterrupt:
                 print("\n👋 Shutting down...")
@@ -1239,7 +1389,7 @@ Exit Mode Short: {EXIT_MODE_SHORT}""")
                 break
             except Exception as e:
                 print(f"❌ Error in main loop: {e}")
-                await asyncio.sleep(CHECK_INTERVAL)
+                await asyncio.sleep(settings.check_interval)
 
 
 class TelegramBotHandler:
@@ -1292,25 +1442,29 @@ class TelegramBotHandler:
                 self.answer_callback(callback_id, f"Executing {signal_type}...")
 
                 if trader:
-                    # Get pending signal with TP target
+                    # Get pending signal with TP target and SL
                     pending = trader.pending_signals.get(symbol_short, {})
                     tp_target = pending.get('target')  # VWAP target
-                    print(f"🔍 DEBUG tp_target={tp_target}")
+                    sl_price = pending.get('stop_loss')  # Signal bar SL
+                    timeframe = pending.get('timeframe', settings.timeframes[0])
+                    print(f"🔍 DEBUG tp_target={tp_target}, sl_price={sl_price}")
 
-                    # Execute trade (SL will be swing-based)
+                    # Execute trade with signal bar SL
                     result, error = trader.execute_signal_trade(
                         symbol, signal_type,
-                        tp_target=tp_target
+                        tp_target=tp_target,
+                        sl_initial=sl_price,
+                        timeframe=timeframe
                     )
 
                     if result:
                         entry = result['entry_price']
                         qty = result['quantity']
                         tp_price = result['tp_sl'].get('tp_price') if result['tp_sl'] else tp_target
-                        sl_price = result['tp_sl'].get('sl_price') if result['tp_sl'] else None
+                        sl_actual = result['tp_sl'].get('sl_price') if result['tp_sl'] else sl_price
 
                         tp_str = f"${tp_price:.4f} (VWAP)" if tp_price else "Not set"
-                        sl_str = f"${sl_price:.4f} (swing)" if sl_price else "Swing-based"
+                        sl_str = f"${sl_actual:.4f} (signal bar)" if sl_actual else "Not set"
 
                         msg = f"""✅ <b>Order Executed!</b>
 
@@ -1318,12 +1472,12 @@ class TelegramBotHandler:
 <b>Side:</b> {signal_type}
 <b>Entry:</b> ${entry:.4f}
 <b>Quantity:</b> {qty}
-<b>Leverage:</b> {LEVERAGE}x
+<b>Leverage:</b> {settings.leverage}x
 
 <b>TP:</b> {tp_str}
 <b>SL:</b> {sl_str}
 
-<i>Trailing SL active (1m swing)</i>"""
+<i>Safety Exit: {settings.num_opposing_bars} consecutive opposing bars</i>"""
                         send_telegram(msg)
 
                         # Clear pending signal
@@ -1455,15 +1609,16 @@ class TelegramBotHandler:
 
 
 async def position_monitor():
-    """Monitor open positions, update trailing SL, and send updates"""
+    """Monitor open positions, check Safety Exit, and send updates"""
     global trader
 
     print("📈 Position monitor started")
-    if TRAILING_STOP_ENABLED:
-        print(f"📈 Trailing stop enabled: {SWING_N} candle swing, {SL_BUFFER_PERCENT}% buffer")
+    if settings.enable_safety_exit:
+        print(f"📈 Safety Exit enabled: {settings.num_opposing_bars} consecutive opposing bars")
 
     last_report_time = 0
-    last_trail_update = {}  # {symbol: timestamp}
+    last_safety_check = {}  # {symbol: timestamp}
+    safety_check_interval = 30  # Check every 30 seconds
     report_interval = 60  # Report positions every 60 seconds
 
     while True:
@@ -1472,50 +1627,39 @@ async def position_monitor():
                 positions = trader.get_positions()
                 current_time = time.time()
 
-                # ========== Trailing Stop Logic ==========
-                if TRAILING_STOP_ENABLED and positions:
+                # ========== Safety Exit Logic ==========
+                if settings.enable_safety_exit and positions:
                     for pos in positions:
                         symbol = pos['symbol']
                         side = pos['side']  # 'long' or 'short'
 
-                        # Check if enough time passed since last trail update
-                        last_update = last_trail_update.get(symbol, 0)
-                        if current_time - last_update < TRAIL_UPDATE_INTERVAL:
+                        # Check if enough time passed since last safety check
+                        last_check = last_safety_check.get(symbol, 0)
+                        if current_time - last_check < safety_check_interval:
                             continue
 
-                        # Calculate new trailing SL
-                        new_sl = trader.calc_trailing_sl(symbol, side)
-                        if new_sl is None:
-                            continue
-
-                        # Get current SL from internal tracking
+                        # Get timeframe from tracked position
                         tracked = trader.positions.get(symbol, {})
-                        current_sl = tracked.get('sl_price')
-                        current_tp = tracked.get('tp_price')
+                        timeframe = tracked.get('timeframe', settings.timeframes[0])
 
-                        if current_sl is None:
-                            # First time - set initial SL
-                            current_sl = new_sl
+                        # Check for Safety Exit condition
+                        should_exit = trader.check_safety_exit(symbol, side, timeframe)
+                        last_safety_check[symbol] = current_time
 
-                        # Apply clamp rule: SL only moves in favorable direction
-                        if side == 'long':
-                            final_sl = max(current_sl, new_sl)  # SL can only go UP
-                        else:
-                            final_sl = min(current_sl, new_sl)  # SL can only go DOWN
+                        if should_exit:
+                            # Close position
+                            symbol_short = symbol.replace('/USDT:USDT', '').replace(':USDT', '')
+                            print(f"🚨 Safety Exit: Closing {side.upper()} position for {symbol_short}")
 
-                        # Only update if SL changed meaningfully (> 0.05%)
-                        if abs(final_sl - current_sl) / current_sl > 0.0005:
-                            success = trader.update_position_sl(symbol, final_sl, current_tp)
-                            if success:
-                                # Update internal tracking
-                                if symbol in trader.positions:
-                                    trader.positions[symbol]['sl_price'] = final_sl
-                                last_trail_update[symbol] = current_time
+                            order = trader.close_position(symbol)
+                            if order:
+                                send_telegram(f"""🚨 <b>Safety Exit Triggered</b>
 
-                                # Notify via Telegram (optional)
-                                symbol_short = symbol.replace('/USDT:USDT', '').replace(':USDT', '')
-                                direction = "⬆️" if side == 'long' else "⬇️"
-                                send_telegram(f"{direction} <b>SL Trailed</b>: {symbol_short}\nNew SL: ${final_sl:.4f}")
+<b>Symbol:</b> {symbol_short}
+<b>Side:</b> {side.upper()}
+<b>Reason:</b> {settings.num_opposing_bars} consecutive opposing bars
+
+<i>Position closed automatically</i>""")
 
                 # ========== Position Report ==========
                 if positions and (current_time - last_report_time) >= report_interval:
@@ -1529,9 +1673,9 @@ async def position_monitor():
                         # Calculate PnL percentage
                         if entry_price > 0:
                             if pos['side'] == 'long':
-                                pnl_pct = ((mark_price - entry_price) / entry_price) * 100 * LEVERAGE
+                                pnl_pct = ((mark_price - entry_price) / entry_price) * 100 * settings.leverage
                             else:
-                                pnl_pct = ((entry_price - mark_price) / entry_price) * 100 * LEVERAGE
+                                pnl_pct = ((entry_price - mark_price) / entry_price) * 100 * settings.leverage
                         else:
                             pnl_pct = 0
 
@@ -1558,11 +1702,11 @@ async def position_monitor():
                     send_telegram_with_buttons(msg, buttons)
                     last_report_time = current_time
 
-            await asyncio.sleep(POSITION_CHECK_INTERVAL)
+            await asyncio.sleep(POSITION_settings.check_interval)
 
         except Exception as e:
             print(f"⚠️ Position monitor error: {e}")
-            await asyncio.sleep(POSITION_CHECK_INTERVAL)
+            await asyncio.sleep(POSITION_settings.check_interval)
 
 
 async def main():
@@ -1582,7 +1726,7 @@ async def main():
         print("⚠️ Trading disabled - no API keys configured")
 
     # Start chart viewer server in background
-    if SEND_CHART:
+    if settings.send_chart:
         server_thread = threading.Thread(target=start_chart_server, daemon=True)
         server_thread.start()
 
@@ -1591,18 +1735,19 @@ async def main():
     telegram_handler = TelegramBotHandler()
 
     # Send startup message
-    trail_status = "ON" if TRAILING_STOP_ENABLED else "OFF"
+    safety_status = "ON" if settings.enable_safety_exit else "OFF"
     startup_msg = f"""🚀 <b>Bybit VWAP Monitor Started</b>
 
-Monitoring top {TOP_OI_COUNT} OI symbols
-Timeframes: {', '.join(TIMEFRAMES)}
-Check Interval: {CHECK_INTERVAL}s
+Monitoring top {settings.top_oi_count} OI symbols
+Timeframes: {', '.join(settings.timeframes)}
+Check Interval: {settings.check_interval}s
 
 <b>Trading Settings:</b>
-Leverage: {LEVERAGE}x
-Order Size: ${ORDER_SIZE_USDT}
+Leverage: {settings.leverage}x
+Order Size: ${settings.order_size_usdt}
 TP: VWAP target
-SL: Trailing ({SWING_N} candle swing) [{trail_status}]
+SL: Signal bar ± {settings.sl_buffer_points} pts
+Safety Exit: {settings.num_opposing_bars} opposing bars [{safety_status}]
 
 <i>Send /help for commands</i>"""
     send_telegram(startup_msg)
