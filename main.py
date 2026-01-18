@@ -823,7 +823,6 @@ def start_chart_server():
                 # If no symbols yet, fetch top OI symbols directly
                 if not symbol_list:
                     try:
-                        global api_exchange
                         if api_exchange is None:
                             init_api_exchange()
                         tickers = api_exchange.fetch_tickers()
