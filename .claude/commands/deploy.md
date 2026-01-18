@@ -17,7 +17,7 @@ When running this command:
 1. First, check `git status` for any uncommitted changes
 2. If there are changes, ask the user for a commit message or suggest one based on the changes
 3. Run `git add -A && git commit -m "message"` then `git push`
-4. Run `ssh crypto "cd /root/crypto-server && git pull"`
+4. Run `ssh crypto "cd /root/vwap-detector && git pull"`
 5. **Auto-detect which session to restart** by running `git log -5 --oneline --name-only` and analyzing changed files:
    - Show a table of recent commits with changed files and recommended session
    - Use the file-to-session mapping below to recommend which session(s) to restart

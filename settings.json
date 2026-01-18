@@ -1,9 +1,9 @@
 {
   "trading": {
-    "leverage": 5,
-    "order_size_usdt": 100,
+    "leverage": 4,
+    "order_size_usdt": 400,
     "position_check_interval": 5,
-    "sl_buffer_points": 20.0
+    "sl_buffer_atr_mult": 0.5
   },
   "strategy": {
     "band_entry_mult": 2.0,
@@ -11,8 +11,8 @@
     "exit_mode_short": "VWAP",
     "target_long_deviation": 2.0,
     "target_short_deviation": 2.0,
-    "min_strength": 0.9,
-    "min_vol_ratio": 1.0
+    "min_strength": 0.7,
+    "min_vol_ratio": 0.05
   },
   "safety_exit": {
     "enabled": true,
@@ -23,8 +23,8 @@
     "allow_shorts": true
   },
   "monitor": {
-    "timeframes": ["3m"],
-    "top_oi_count": 2,
+    "timeframes": ["1h"],
+    "top_oi_count": 1,
     "check_interval": 15
   },
   "filters": {

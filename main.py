@@ -45,7 +45,7 @@ DEFAULT_SETTINGS = {
         "leverage": 20,
         "order_size_usdt": 100,
         "position_check_interval": 10,
-        "sl_buffer_points": 20.0
+        "sl_buffer_atr_mult": 0.5
     },
     "strategy": {
         "band_entry_mult": 2.0,
@@ -140,8 +140,8 @@ class Settings:
         return self._settings.get('trading', {}).get('position_check_interval', 10)
 
     @property
-    def sl_buffer_points(self):
-        return self._settings.get('trading', {}).get('sl_buffer_points', 20.0)
+    def sl_buffer_atr_mult(self):
+        return self._settings.get('trading', {}).get('sl_buffer_atr_mult', 0.5)
 
     # Strategy settings
     @property
@@ -627,6 +627,26 @@ class BybitTrader:
 # Global trader instance
 trader = None
 
+# Global live data for API access (shared with chart viewer)
+api_live_data = {
+    'symbols': [],
+    'signals': {},
+    'signal_history': [],
+    'timeframe': '1h'
+}
+
+# Global exchange instance for API endpoints (public data only)
+api_exchange = None
+
+
+def init_api_exchange():
+    """Initialize exchange for API endpoints (public data)"""
+    global api_exchange
+    api_exchange = ccxt.bybit({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'linear'}
+    })
+
 
 def init_trader():
     """Initialize global trader instance"""
@@ -778,12 +798,123 @@ def start_chart_server():
 
         def do_GET(self):
             """Handle GET requests including API"""
-            if self.path == '/api/settings':
+            from urllib.parse import urlparse, parse_qs
+
+            parsed = urlparse(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query)
+
+            if path == '/api/settings':
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps(settings.to_dict()).encode())
+
+            elif path == '/api/symbols':
+                # Return list of monitored symbols
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                symbols = api_live_data.get('symbols', [])
+                # Extract symbol names
+                symbol_list = [s['symbol'] if isinstance(s, dict) else s for s in symbols]
+                self.wfile.write(json.dumps({'symbols': symbol_list}).encode())
+
+            elif path == '/api/ohlcv':
+                # Return OHLCV data with VWAP/bands for chart viewer
+                symbol = query.get('symbol', [None])[0]
+                timeframe = query.get('timeframe', [settings.timeframes[0]])[0]
+
+                if not symbol:
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'error': 'symbol required'}).encode())
+                    return
+
+                try:
+                    global api_exchange
+                    if api_exchange is None:
+                        init_api_exchange()
+
+                    # Fetch OHLCV data
+                    ohlcv = api_exchange.fetch_ohlcv(symbol, timeframe, limit=500)
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+                    # Calculate VWAP
+                    strategy = VWAPStrategy()
+                    vwap_df = strategy.calculate_vwap(df.copy(), symbol, timeframe)
+                    df = pd.concat([df.reset_index(drop=True), vwap_df], axis=1)
+
+                    # Check for signals on each bar
+                    signals = []
+                    for i in range(50, len(df)):
+                        bar_df = df.iloc[:i+1].copy()
+                        result = strategy.check_signal(bar_df, symbol, timeframe)
+                        if result and result.get('type'):
+                            signals.append({
+                                'time': int(df.iloc[i]['timestamp'] / 1000),
+                                'type': result['type'],
+                                'price': float(df.iloc[i]['close'])
+                            })
+
+                    # Format data for TradingView lightweight-charts
+                    candles = []
+                    vwap_data = []
+                    upper_band_data = []
+                    lower_band_data = []
+
+                    for _, row in df.iterrows():
+                        time_sec = int(row['timestamp'] / 1000)
+                        candles.append({
+                            'time': time_sec,
+                            'open': float(row['open']),
+                            'high': float(row['high']),
+                            'low': float(row['low']),
+                            'close': float(row['close'])
+                        })
+                        if pd.notna(row.get('vwap')):
+                            vwap_data.append({'time': time_sec, 'value': float(row['vwap'])})
+                        if pd.notna(row.get('upper_band')):
+                            upper_band_data.append({'time': time_sec, 'value': float(row['upper_band'])})
+                        if pd.notna(row.get('lower_band')):
+                            lower_band_data.append({'time': time_sec, 'value': float(row['lower_band'])})
+
+                    response = {
+                        'candles': candles,
+                        'vwap': vwap_data,
+                        'upper_band': upper_band_data,
+                        'lower_band': lower_band_data,
+                        'signals': signals
+                    }
+
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(response).encode())
+
+                except Exception as e:
+                    self.send_response(500)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+            elif path == '/api/signals':
+                # Return signal history
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'signals': api_live_data.get('signal_history', []),
+                    'current': api_live_data.get('signals', {})
+                }).encode())
+
             else:
                 # Serve static files
                 super().do_GET()
@@ -826,8 +957,7 @@ def start_chart_server():
     try:
         port = settings.chart_server_port
         with socketserver.TCPServer(("", port), APIHandler) as httpd:
-            print(f"📊 Chart viewer: http://localhost:{port}/chart_viewer.html")
-            print(f"⚙️  Settings UI: http://localhost:{port}/settings.html")
+            print(f"📊 Dashboard: http://localhost:{port}/chart_viewer.html")
             httpd.serve_forever()
     except OSError as e:
         if e.errno == 48:  # Address already in use
@@ -994,8 +1124,9 @@ class VWAPStrategy:
                 target = current['vwap'] + current['stdev'] * settings.target_long_deviation
             else:
                 target = None
-            # SL = signal bar low - buffer (matches Pine Script)
-            stop_loss = current['low'] - settings.sl_buffer_points
+            # SL = signal bar low - ATR buffer (scales with volatility)
+            atr_buffer = current['atr'] * settings.sl_buffer_atr_mult
+            stop_loss = current['low'] - atr_buffer
             return {
                 'type': 'LONG',
                 'price': current['close'],
@@ -1005,6 +1136,8 @@ class VWAPStrategy:
                 'target': target,
                 'exit_mode': settings.exit_mode_long,
                 'vwap': current['vwap'],
+                'atr': current['atr'],
+                'atr_buffer': atr_buffer,
                 'strength': bull_strength,
                 'vol_ratio': vol_ratio,
                 'debug': debug_info
@@ -1018,8 +1151,9 @@ class VWAPStrategy:
                 target = current['vwap'] - current['stdev'] * settings.target_short_deviation
             else:
                 target = None
-            # SL = signal bar high + buffer (matches Pine Script)
-            stop_loss = current['high'] + settings.sl_buffer_points
+            # SL = signal bar high + ATR buffer (scales with volatility)
+            atr_buffer = current['atr'] * settings.sl_buffer_atr_mult
+            stop_loss = current['high'] + atr_buffer
             return {
                 'type': 'SHORT',
                 'price': current['close'],
@@ -1029,6 +1163,8 @@ class VWAPStrategy:
                 'target': target,
                 'exit_mode': settings.exit_mode_short,
                 'vwap': current['vwap'],
+                'atr': current['atr'],
+                'atr_buffer': atr_buffer,
                 'strength': bear_strength,
                 'vol_ratio': vol_ratio,
                 'debug': debug_info
@@ -1071,11 +1207,17 @@ class BybitMonitor:
             return False
 
     def update_live_data(self, symbols_data):
-        """Update live_data.json for the HTML viewer"""
-        import json
+        """Update live_data.json for the HTML viewer and sync with API"""
+        global api_live_data
 
         self.live_data['symbols'] = symbols_data
         self.live_data['updated'] = datetime.now().isoformat()
+
+        # Sync with global api_live_data for API endpoints
+        api_live_data['symbols'] = symbols_data
+        api_live_data['signals'] = self.live_data.get('signals', {})
+        api_live_data['signal_history'] = self.live_data.get('signal_history', [])
+        api_live_data['timeframe'] = self.live_data.get('timeframe', settings.timeframes[0])
 
         os.makedirs('charts', exist_ok=True)
         with open('charts/live_data.json', 'w') as f:
@@ -1150,11 +1292,12 @@ class BybitMonitor:
         else:
             target_line = f"<b>Target:</b> None (Exit Mode: {exit_mode})"
 
-        # Format SL line
+        # Format SL line with ATR info
         if signal.get('stop_loss') is not None:
-            sl_line = f"<b>SL:</b> ${signal['stop_loss']:.4f} (signal bar)"
+            atr_buffer = signal.get('atr_buffer', 0)
+            sl_line = f"<b>SL:</b> ${signal['stop_loss']:.4f} (ATR×{settings.sl_buffer_atr_mult}={atr_buffer:.2f})"
         else:
-            sl_line = "<b>SL:</b> Signal bar ± {settings.sl_buffer_points} pts"
+            sl_line = f"<b>SL:</b> Signal bar ± ATR×{settings.sl_buffer_atr_mult}"
 
         message = f"""
 {emoji} <b>{signal_type} SIGNAL</b> {emoji}
@@ -1255,7 +1398,8 @@ class BybitMonitor:
                     print(f"🎯 SIGNAL DETECTED: {symbol} ({timeframe})")
                     print(f"   Type: {signal['type']}")
                     print(f"   Entry: ${signal['price']:.4f}")
-                    print(f"   SL: ${signal['stop_loss']:.4f} (signal bar)")
+                    atr_buf = signal.get('atr_buffer', 0)
+                    print(f"   SL: ${signal['stop_loss']:.4f} (ATR×{settings.sl_buffer_atr_mult}={atr_buf:.2f})")
                     if signal['target'] is not None:
                         print(f"   TP ({signal['exit_mode']}): ${signal['target']:.4f}")
                     else:
@@ -1299,7 +1443,7 @@ class BybitMonitor:
         print(f"\n📋 Strategy Parameters:")
         print(f"   Session Timezone: {settings.session_timezone} (VWAP resets at 00:00 {settings.session_timezone})")
         print(f"   Display Timezone: {settings.display_timezone} (chart x-axis)")
-        print(f"   SL: Signal bar ± {settings.sl_buffer_points} pts")
+        print(f"   SL: Signal bar ± ATR×{settings.sl_buffer_atr_mult}")
         print(f"   Safety Exit: {settings.num_opposing_bars} consecutive opposing bars")
         print(f"   Band Entry Mult: {settings.band_entry_mult}")
         print(f"   Exit Mode Long: {settings.exit_mode_long}")
@@ -1464,7 +1608,7 @@ class TelegramBotHandler:
                         sl_actual = result['tp_sl'].get('sl_price') if result['tp_sl'] else sl_price
 
                         tp_str = f"${tp_price:.4f} (VWAP)" if tp_price else "Not set"
-                        sl_str = f"${sl_actual:.4f} (signal bar)" if sl_actual else "Not set"
+                        sl_str = f"${sl_actual:.4f} (ATR-based)" if sl_actual else "Not set"
 
                         msg = f"""✅ <b>Order Executed!</b>
 
@@ -1702,11 +1846,11 @@ async def position_monitor():
                     send_telegram_with_buttons(msg, buttons)
                     last_report_time = current_time
 
-            await asyncio.sleep(POSITION_settings.check_interval)
+            await asyncio.sleep(settings.position_check_interval)
 
         except Exception as e:
             print(f"⚠️ Position monitor error: {e}")
-            await asyncio.sleep(POSITION_settings.check_interval)
+            await asyncio.sleep(settings.position_check_interval)
 
 
 async def main():
@@ -1746,7 +1890,7 @@ Check Interval: {settings.check_interval}s
 Leverage: {settings.leverage}x
 Order Size: ${settings.order_size_usdt}
 TP: VWAP target
-SL: Signal bar ± {settings.sl_buffer_points} pts
+SL: Signal bar ± ATR×{settings.sl_buffer_atr_mult}
 Safety Exit: {settings.num_opposing_bars} opposing bars [{safety_status}]
 
 <i>Send /help for commands</i>"""
