@@ -1483,8 +1483,13 @@ class BybitMonitor:
                 if df is None or len(df) < 15:
                     continue
 
-                # Check for signal
-                result = self.strategy.check_signal(df, symbol, timeframe)
+                # Exclude last candle (incomplete/current candle) - only check closed candles
+                df_closed = df.iloc[:-1].copy()
+                if len(df_closed) < 15:
+                    continue
+
+                # Check for signal on closed candles only
+                result = self.strategy.check_signal(df_closed, symbol, timeframe)
 
                 if result is None:
                     continue
@@ -1617,8 +1622,9 @@ Exit Mode Short: {settings.exit_mode_short}""")
                             }
                             symbols_data.append(symbol_info)
 
-                            # Check for current signal
-                            result = self.strategy.check_signal(df, symbol, timeframe)
+                            # Check for signal on closed candles only
+                            df_closed = df.iloc[:-1].copy() if len(df) > 15 else df
+                            result = self.strategy.check_signal(df_closed, symbol, timeframe)
                             if result and result.get('type'):
                                 self.live_data['signals'][symbol] = {
                                     'type': result['type'],
